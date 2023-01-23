@@ -1,0 +1,26 @@
+#!/bin/sh
+#info: Create a fastpkg repo template file
+
+# parse arguments
+if [ -z "$1" ] || [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
+    man fastpkg.1 || ronn -r <README.md | man -l -
+    exit
+else
+    FILE_NAME="$1"
+    case "$FILE_NAME" in
+    '' | *['!&()'@#$%^*+]*)
+        echo "Invalid filename"
+        exit 1
+        ;;
+    esac
+fi
+
+HEADER="NAME,VERSION,EXTENSION,INSTALLER,SCRIPT,DESCRIPTION,SHA256,SOURCE"
+TARGET_FILE="$FILE_NAME.csv"
+
+# check if a file does not exist
+if [ ! -f "$TARGET_FILE" ]; then
+    echo "$HEADER" >"$TARGET_FILE"
+else
+    echo "File already exists"
+fi

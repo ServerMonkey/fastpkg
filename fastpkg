@@ -1,0 +1,1384 @@
+#!/usr/bin/env python3
+# coding=utf-8
+# PYTHON_ARGCOMPLETE_OK
+
+# PARSER LIBRARIES ############################################################
+
+import argparse
+import platform
+
+py_ver = platform.python_version()
+
+if py_ver.startswith("3"):
+    import argcomplete  # noqa
+
+# BASIC STATIC VARIABLES ######################################################
+
+# application path and files
+path_base = "/var/lib/fastpkg/"
+path_downloads = path_base + "downloads/"
+path_tmp = path_base + "tmp/"
+path_downloads_log = path_base + "downloads_log/"
+path_list_cache = path_base + "list_cache/"
+file_repo_cache = path_base + "cache.csv"
+file_installed_pkgs = path_base + "installed.csv"
+path_cfg = "/etc/fastpkg/"
+file_repo_list = path_cfg + "fastpkg.list"
+file_cfg = path_cfg + "config.cfg"
+file_pkgs = "packages.csv"
+file_pkgs_gpg = file_pkgs + ".gpg"
+
+# PARSER INIT #################################################################
+
+# set main parser
+parser = argparse.ArgumentParser(description="Simple suckless package \
+                                 manager.")
+
+# designate the target variable for the main parser,
+# which is the main applications file name
+subparsers = parser.add_subparsers(dest="command")
+
+# todo: only allow dots in version name sheme
+parser.add_argument(
+    "-a", "--all",
+    help="Use instead of '-p'. Selects all packages in the repo(s).",
+    action='store_true'
+)
+
+parser.add_argument(
+    "-b", "--blackwhite",
+    help="Don't colorize output",
+    action='store_true'
+)
+
+parser.add_argument(
+    "-f", "--force",
+    help="Redownload package. Can fix broken downloads.",
+    action='store_true'
+)
+
+parser.add_argument(
+    "-p", "--package",
+    help="Name of a package or packages. Comma separate multible packages. \
+    Specify a version with underscore: <PACKAGE>_<VERSION>",
+    metavar='PACKAGE_NAME',
+    type=str,
+)
+
+parser.add_argument(
+    "-q", "--quiet",
+    help="Supress all confirming output, show only errors and warnings.",
+    action='store_true'
+)
+
+parser.add_argument(
+    "-r", "--repo",
+    help="Specify a single repo to target.",
+    metavar='REPO_URL',
+    type=str,
+)
+
+parser.add_argument(
+    "-v", "--verbose",
+    help="Get extra information. -v is recommendet for users, \
+    -vv is basic debugging, \
+    -vvv is for full debugging.",
+    action='count'
+)
+
+parser_cleanup = subparsers.add_parser(
+    "cleanup",
+    help="Delete all files in the download folder that are not \
+    in the current package-cache."
+)
+
+parser_download = subparsers.add_parser(
+    "download",
+    help="Download a package or packages, without installing. \
+    Uses parallel download."
+)
+
+parser_edit = subparsers.add_parser(
+    "edit",
+    help="Edit the repo list file " + file_repo_list + " ."
+)
+
+parser_enlist = subparsers.add_parser(
+    "enlist",
+    help="Append a repo URL to the repo list file " + file_repo_list + " ."
+)
+
+parser_enlist.add_argument(
+    "--insecure",
+    help="Ignore GPG verification of the repos package list.",
+    action='store_true'
+)
+
+parser_erase = subparsers.add_parser(
+    "erase",
+    help="Delete the download-cache for a package. \
+    Does not remove the installed package."
+)
+
+parser_exportcache = subparsers.add_parser(
+    "exportcache",
+    help="Export a custom package-cache to be used on an offline host. \
+    Define packages with -p or -a to narrow down the package-cache."
+)
+
+parser_init = subparsers.add_parser(
+    "init",
+    help="Create basic folder structure."
+)
+
+parser_install = subparsers.add_parser(
+    "install",
+    help="Download and install a package. \
+    Expects that you have a package-cache. E.g. ran 'update' beforehand or \
+    have copied download-cache and package-cache from another host."
+)
+
+parser_install.add_argument(
+    "-i", "--installpath",
+    help="Override where to install packages with a custom installation path.",
+    metavar='PATH',
+    type=str
+)
+
+parser_list = subparsers.add_parser(
+    "list",
+    help="List all packages. Use -v to see if the packages are \
+    downloaded and/ore installed."
+)
+
+parser_mirror = subparsers.add_parser(
+    "mirror",
+    help="Create a copy of every repos package file, \
+    but replace every packages download URL with a custom URL. \
+    Useful to create an offline file-mirror to be used on an internal network."
+)
+
+parser_mirror.add_argument(
+    "-u, --url",
+    help="Enter the URL adress where your downloaded packages \
+    will be found. Combine with --makerepo to create a fully working mirror.",
+    metavar='URL',
+    type=str
+)
+
+parser_mirror.add_argument(
+    "-m, --makerepo",
+    help="Automatically create symlinks for all downloaded packages, to be \
+    used on a webserver. Combine with --url to create a fully working mirror.",
+    metavar='PATH_WWW',
+    type=str
+)
+
+parser_remove = subparsers.add_parser(
+    "remove",
+    help="Remove (uninstall) a package from the system. \
+    Does not delete the download-cache."
+)
+
+parser_search = subparsers.add_parser(
+    "search",
+    help="Search for a package in package names and descriptions."
+)
+
+parser_show = subparsers.add_parser(
+    "show",
+    help="Show package details"
+)
+
+parser_show.add_argument(
+    "-d", "--downloadpath",
+    help="Only show the Download-Path variable.",
+    action='store_true'
+)
+
+parser_update = subparsers.add_parser(
+    "update",
+    help="Update cache for every repo found in " + file_repo_list + " ."
+)
+
+# init TAB complete and parsers
+if py_ver.startswith("3"):
+    argcomplete.autocomplete(parser)
+
+args = parser.parse_args()
+
+# exit if there are no commands at all
+if not args.command:
+    parser.parse_args(["--help"])
+
+# LIBRARIES ###################################################################
+
+if py_ver.startswith("3"):
+    import requests  # noqa
+    from http.client import responses
+import os
+import csv
+import hashlib
+import shutil
+import string
+from distutils.spawn import find_executable
+from subprocess import PIPE, Popen
+
+# STATIC VARIABLES ############################################################
+
+# colors
+col_end = "\x1b[0m"  # stop printing with color
+col_debug_vv = "\x1b[0;32;40m"  # green on black
+col_debug_vvv = "\x1b[0;34;40m"  # blue on black
+col_debug_vvvv = "\x1b[0;35;40m"  # purple on black
+col_blue = "\x1b[7;34;40m"
+col_yellow = "\x1b[7;33;40m"
+col_red = "\x1b[7;31;40m"
+col_green = "\x1b[7;32;40m"
+col_cyan = "\x1b[7;36;40m"
+
+# text strings
+text_err_abort = "ERROR, aborting:"
+
+
+# FUNCTIONS ###################################################################
+
+def box(text_input):
+    return "[" + text_input + "] "
+
+
+def color(color_name, text_input):
+    text_prefix = ""
+    text_suffix = ""
+    # defaut colorize output
+    if not args.blackwhite:
+        text_suffix = "\x1b[0m"  # stop printing in color
+
+        if color_name == 'red':
+            text_prefix = "\x1b[7;31;40m"
+        elif color_name == 'green':
+            text_prefix = "\x1b[7;32;40m"
+        elif color_name == 'yellow':
+            text_prefix = "\x1b[7;33;40m"
+        elif color_name == 'blue':
+            text_prefix = "\x1b[7;34;40m"
+        # todo: remove?
+        # elif color_name == 'v':
+        #    text_prefix = "\x1b[0;32;40m"  # green on black
+        elif color_name == 'vv':
+            text_prefix = "\x1b[0;34;40m"  # blue on black
+        elif color_name == 'vvv':
+            text_prefix = "\x1b[0;35;40m"  # purple on black
+
+    return text_prefix + text_input + text_suffix
+
+
+def printv(text):
+    if args.verbose and args.verbose >= 1:
+        print(text)
+
+
+def printvv(text):
+    if args.verbose and args.verbose >= 2:
+        print(color('vv', text))
+
+
+def printvvv(text):
+    if args.verbose and args.verbose >= 3:
+        print(color('vvv', text))
+
+
+def print_status(text, msg_type="", error_text="unknown"):
+    if msg_type == "err":
+        print(box(color('red', "FAIL")) + text + " - Error: " + error_text)
+    elif msg_type == "warn":
+        print(box(color('yellow', "WARN")) + text + " - " + error_text)
+    elif msg_type == "dl":
+        if not args.quiet:
+            print(box(color('yellow', " DL ")) + text)
+    elif msg_type == "inst":
+        if not args.quiet:
+            print(box(color('yellow', "INST")) + text)
+    # default status is "OK"
+    else:
+        if not args.quiet:
+            print(box(color('green', " OK ")) + text)
+
+
+def error_warn(error_message):
+    print(error_message)
+    exit(1)
+
+
+def error_crit(error_message):
+    print(color('red', "ERROR, aborting:") + " " + error_message)
+    exit(1)
+
+
+def io_change_dir(target_dir):
+    if os.path.isdir(target_dir):
+        printvvv("change_dir: " + target_dir)
+        os.chdir(target_dir)
+    else:
+        error_crit("change_dir: path does not exist: " + target_dir)
+
+
+def io_take_ownership(des_file):
+    # only remove in allowed path
+    if des_file.startswith(path_base) or des_file == file_repo_list:
+        os.chmod(des_file, 0o644)
+    else:
+        error_crit("take_ownership: forbidden to chmod outside of "
+                   + path_base + " and " + file_repo_list + " file: "
+                   + des_file)
+
+
+def io_remove_file(des_file):
+    # only remove in allowed path
+    if des_file.startswith(path_base):
+        try:
+            if os.path.isfile(des_file):
+                os.remove(des_file)
+                printvvv("remove_file: " + des_file)
+            else:
+                printvvv("remove_file: already removed: " + des_file)
+        except Exception as error:
+            error_crit("remove_file: " + str(error) + " file: " + des_file)
+    else:
+        error_crit("remove_file: forbidden to remove outside of "
+                   + path_base + " file: " + des_file)
+
+
+def io_remove_dir(directory):
+    # only remove in allowed path
+    if directory.startswith(path_base):
+        try:
+            if os.path.exists(directory):
+                shutil.rmtree(directory)
+                printvvv("remove_dir: OK " + directory)
+            else:
+                printvvv("remove_dir: already removed: " + directory)
+        except Exception as error:
+            error_crit("remove_dir: " + str(error) + " dir: " + directory)
+    else:
+        error_crit("remove_dir: forbidden to remove files outside of "
+                   + path_base + " file: " + directory)
+
+
+def io_make_dir(directory):
+    if not os.path.isdir(directory):
+        os.makedirs(directory, mode=0o755)
+        printvvv("make_dir: OK " + directory)
+
+
+def io_touch(des_file):
+    # only change file in allowed path
+    if des_file.startswith(path_base) or des_file == file_repo_list:
+        if not os.path.isfile(des_file):
+            os.mknod(des_file)
+            printvvv("touch: OK " + des_file)
+        io_take_ownership(des_file)
+    else:
+        error_crit("touch: forbidden to change files outside of "
+                   + path_base + " and " + file_repo_list + " file: "
+                   + des_file)
+
+
+def io_copy_file(file_from, file_to):
+    # returns false if file already exists
+    printvvv("copy_file from: " + file_from)
+    printvvv("copy_file to  : " + file_to)
+
+    if not os.path.isfile(file_from):
+        error_crit("copy_file: missing source file: " + file_from)
+
+    if os.path.isfile(file_to):
+        printvvv("copy_file: OK exists already")
+        return False
+
+    try:
+        io_make_dir(os.path.dirname(file_to))
+        shutil.copyfile(file_from, file_to)
+        printvvv("copy_file: OK")
+        return True
+    except Exception as error:
+        error_crit("copy_file: " + str(error))
+
+
+def io_link_file(file_from, link_to):
+    # returns false if file already exists
+    printvvv("link_file from: " + file_from)
+    printvvv("link_file to  : " + link_to)
+
+    if not os.path.isfile(file_from):
+        error_crit("link_file: missing source file: " + file_from)
+
+    if os.path.isfile(link_to):
+        printvvv("link_file: OK exists already")
+        return False
+
+    try:
+        io_make_dir(os.path.dirname(link_to))
+        os.symlink(file_from, link_to)
+        printvvv("link_file: OK")
+        return True
+    except Exception as error:
+        error_crit("link_file: " + str(error))
+
+
+def io_move_file(file_from, file_to):
+    text_info = " " + file_from + " --> " + file_to
+
+    try:
+        shutil.move(file_from, file_to)
+        printvvv("move_file: OK" + text_info)
+    except Exception as error:
+        error_crit("move_file: " + str(error) + text_info)
+
+
+def io_add_line_to_file(des_file, line):
+    # only append in allowed paths
+    if des_file.startswith(path_base) or des_file == file_repo_list:
+        try:
+            f = open(des_file, "a")
+            f.write(line + '\n')
+            f.close()
+            printvvv("add_line_to_file: OK " + des_file + " with: " + line)
+        except Exception as error:
+            error_crit("add_line_to_file: " + des_file + " " + str(error))
+    else:
+        error_crit("add_line_to_file: forbidden to append files outside of "
+                   + path_base + " file: " + des_file)
+
+
+def io_file_to_list(des_file):
+    data = []
+    try:
+        f = open(des_file, "r")
+        for line in f:
+            data.append(line.rstrip('\n'))
+        f.close()
+        printvvv("file_to_list: OK " + des_file)
+    except IOError:
+        printvvv("file_to_list: file not found: " + des_file)
+    except Exception as error:
+        error_crit("file_to_list: " + str(error))
+
+    return data
+
+
+def io_download_file(url, file_out):
+    text_info = url + " --> " + file_out
+
+    # don't overwrite existing file
+    if os.path.isfile(file_out):
+        print_status("download_file", 'err', 'destination exists')
+        return False
+
+    if check_remote_host(url):
+        printvvv("download_file: " + text_info)
+        try:
+            data = requests.get(url, timeout=10)
+            if data.status_code == 200:
+                open(file_out, 'wb').write(data.content)
+        except Exception as error:
+            print_status("download_file", 'err', text_info + " " + error)
+            return False
+        return True
+
+
+def shell_cmd(cmd):
+    printvv("SHELL: " + cmd)
+    p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
+    stdout, stderr = p.communicate()
+
+    if stderr != "":
+        if stdout:
+            print_status("stdout", "err", stdout)
+        print_status("stderr", "err", stderr)
+        error_crit("shell_cmd failed '" + cmd + "'")
+    else:
+        return stdout
+
+
+def hash_file(file_path, correct_hash):
+    file_name = os.path.basename(file_path)
+
+    try:
+        with open(file_path, 'rb') as f:
+            file_bytes = f.read()
+            file_hash = hashlib.sha256(file_bytes).hexdigest()
+        printvvv("hash_file: read hash OK " + file_path)
+    except Exception as error:
+        error_crit("hash_file: " + file_path + " " + str(error))
+
+    if file_hash == correct_hash:
+        print_status(file_name + " hash verified")
+        return True
+    else:
+        print_status(file_name, "err", "hash does not match, removing")
+        io_remove_file(file_path)
+        printvv("hash details: " + file_path + " is: "
+                + file_hash + " should be: " + correct_hash)
+        return False
+
+
+def uri_to_reponame(uri):
+    reponame = uri
+
+    if uri.startswith("file://"):
+        reponame = reponame.replace("file:///", "osroot_")
+        reponame = reponame.replace("file://", "")
+        reponame = reponame.replace(".csv", "")
+
+    elif uri.startswith("https://"):
+        reponame = reponame.replace("https://", "")
+        reponame = reponame.rstrip("/")
+
+    reponame = reponame.replace("/", "_")
+
+    # create a usable filename
+    valid_chars = "-_. %s%s" % (string.ascii_letters, string.digits)
+    reponame = ''.join(c for c in reponame if c in valid_chars)
+
+    # todo: fix
+    # create a shorter filename
+    # info = (data[:75] + '..') if len(data) > 75 else data
+    # check for a valid URI
+    # check input for: special characters
+    # check that input starts with https://
+    # check input for: too long filename
+
+    printvvv("uri_to_reponame: " + reponame)
+    return reponame
+
+
+def verify_csv(des_file):
+    basename = os.path.basename(des_file)
+
+    try:
+        csv_file = open(des_file, 'rt')
+        # todo: remove dialect string?
+        dialect = csv.Sniffer().sniff(csv_file.read(3072), delimiters=",")
+        # Perform various checks on the dialect (e.g., lineseparator,
+        # delimiter) to make sure it's sane
+        # reset the read position to start of file before reading any entries
+        csv_file.seek(0)
+        print_status("verifying csv " + basename)
+        return True
+    except IOError:
+        print_status("verifying csv " + basename, "warn", "no such file")
+        return False
+    except Exception as csv_error:
+        print_status("verifying csv " + basename, "warn", str(csv_error))
+        return False
+
+
+def verify_repo_list(list_repo):
+    printvvv("verify_repo_list: ")
+
+    count_rows = 0
+    for row in range(len(list_repo)):
+        count_cells = 0
+        for cell in list_repo[row]:
+            pkg_name = list_repo[row][0]
+            if pkg_name == "":
+                print("error in first column, cell is empty")
+                return False
+            # check for empty cells, ignore column "SCRIPT"
+            elif count_cells != 4 and cell == "":
+                print("error in row "
+                      + "'" + pkg_name + "'"
+                      + " cell " + str(count_cells + 1)
+                      + ", missing value")
+                return False
+            count_cells = count_cells + 1
+        count_rows = count_rows + 1
+
+    return True
+
+
+def packages_csv_to_list(file_csv):
+    repo_name = os.path.basename(file_csv)
+    text_info = "packages_csv_to_list: " + repo_name + " "
+    list_good_header = ['NAME',
+                        'VERSION',
+                        'EXTENSION',
+                        'INSTALLER',
+                        'SCRIPT',
+                        'DESCRIPTION',
+                        'SHA256',
+                        'SOURCE']
+    list_rows = []
+
+    # read CSV and verify CSV format
+    # todo: with open(file_csv, newline='') as csvfile:
+    with open(file_csv) as csvfile:
+        csv_fastpkg_format = csv.reader(csvfile, delimiter=',', quotechar='|')
+        counter = 0
+        for csv_row in csv_fastpkg_format:
+            counter = counter + 1
+            current_row = ''.join(csv_row)
+
+            # first line must be header
+            if counter == 1:
+                if not csv_row == list_good_header:
+                    print_status("verifying header " + repo_name, "warn",
+                                 "wrong CSV header format")
+                    return []
+                else:
+                    printvvv(text_info + "verifying header OK "
+                             + repo_name)
+            # skip empty lines and comments
+            elif current_row == '' or current_row.startswith('#'):
+                pass
+            # add to data
+            else:
+                list_rows.append(csv_row)
+
+    # verify repo list file
+    if not verify_repo_list(list_rows):
+        error_crit("failed to verify CSV")
+
+    return list_rows
+
+
+def cache_csv_to_list():
+    list_rows = []
+
+    # abort if there is no cache
+    if not os.path.exists(file_repo_cache):
+        error_warn("No Repo cache present, please run 'fastpkg update' first")
+
+    # convert csv to list
+    try:
+        # todo: with open(file_repo_cache, newline='') as csvfile:
+        with open(file_repo_cache) as csvfile:
+            csv_fastpkg_format = csv.reader(
+                csvfile, delimiter=',', quotechar='|')
+            for csv_row in csv_fastpkg_format:
+                list_rows.append(csv_row)
+        printvvv("cache_csv_to_list: convert csv to list OK")
+    except IOError:
+        error_crit("cache_csv_to_list: file not found: " + file_repo_cache)
+    except Exception as error:
+        error_crit("cache_csv_to_list: " + str(error))
+
+    # verify repo list file
+    if not verify_repo_list(list_rows):
+        error_crit("failed to verify CSV")
+
+    # filter for specific packages
+    if args.package:
+        list_rows_filtered = []
+        for i in range(len(list_rows)):
+            # ignore case on input package string
+            pkg_search = args.package.lstrip('=').lower()
+            pkg_nam = str(list_rows[i][0]).lower()
+            pkg_ver = str(list_rows[i][1])
+            text_search = ": " + pkg_nam + " " + pkg_ver
+            # exact match
+            if pkg_search == pkg_nam:
+                printvvv("search: exact match" + text_search)
+                list_rows_filtered.append(list_rows[i])
+            # wildcard match
+            elif '*' in pkg_search:
+                pkg_search_wildcard = pkg_search.replace('*', '')
+                if pkg_nam.startswith(pkg_search_wildcard):
+                    printvvv("search: wildcard match" + text_search)
+                    list_rows_filtered.append(list_rows[i])
+            # match version
+            elif '_' in pkg_search:
+                pkg_search_split = pkg_search.split("_")
+                pkg_search_pkg = pkg_search_split[0]
+                pkg_search_ver = pkg_search_split[1]
+                # exact match
+                if pkg_search_pkg == pkg_nam and pkg_search_ver == pkg_ver:
+                    printvvv("search: version match" + text_search)
+                    list_rows_filtered.append(list_rows[i])
+
+        if not list_rows_filtered:
+            print("Package '" + args.package + "' not found")
+            exit(1)
+
+        return list_rows_filtered
+
+    elif args.all:
+        return list_rows
+
+    else:
+        error_warn("No packages selected")
+
+
+def packages_list_to_data(list_packages):
+    for j in list_packages:
+        name_split = j[0].rsplit('_', 1)
+        ver_and_ext = name_split[1].rsplit('.', 1)
+        # name
+        name = name_split[0].lower()
+        # version
+        version = ver_and_ext[0]
+        # extension
+        extension = ver_and_ext[1]
+        # installer
+        if extension == 'fpkgsh':
+            installer = 'shellscript'
+        else:
+            installer = j[1]
+        # description
+        if j[3]:
+            descript = "  '" + j[3] + "'"
+        else:
+            descript = ''
+
+        return name, version, extension, installer, descript
+
+
+def check_remote_host(url):
+    header_size = {"Range": "bytes=0-100"}
+    try:
+        # only try to download a small part
+        remote_url = requests.get(url, headers=header_size, timeout=10)
+        printvvv("check_remote_host: final url: " + remote_url.url)
+        status = remote_url.status_code
+        status_nr = str(status)
+        status_text = responses[status]
+        if status == 200:
+            # ok
+            printvvv("check_remote_host: OK " + status_nr + " " + url)
+            return True
+        elif status == 206:
+            # ok, range header
+            printvvv("check_remote_host: OK " + status_nr + " " + url)
+            return True
+        elif status == 403:
+            print_status(url, 'err', status_text + ", probably DoS protected")
+            return False
+        else:
+            print_status(url, 'err', "unhandled status code " +
+                         status_nr + " " + status_text)
+            return False
+    except requests.exceptions.Timeout:
+        print_status(url, 'err', "host timed-out")
+        return False
+    except requests.exceptions.ConnectionError:
+        print_status(url, 'err', "host/network is unreachable")
+        return False
+    except Exception as error:
+        print_status(url, 'err', str(error))
+        return False
+
+
+def pre_extract(file_in, path_out, file_name_out):
+    file_out = path_out + file_name_out
+    print_status(file_name_out + " extracting", 'inst')
+
+    if os.path.isfile(file_out):
+        print_status(file_name_out + " already extracted")
+        return
+
+    io_change_dir(path_out)
+    shell_cmd("dtrx -q -n --one rename " + file_in)
+    if os.path.isfile(file_out):
+        io_take_ownership(file_out)
+        print_status(file_name_out + " extracted")
+    else:
+        error_crit("extract: can not find file: " + file_out)
+
+
+def extract_app(file_in, path_out, file_name_out):
+    # do not reinstall
+    if os.path.exists(path_out):
+        if not os.listdir(path_out):
+            print_status(file_name_out + " extracting", 'inst')
+            printvvv("extract_app: directory exists but is empty")
+        else:
+            print_status(file_name_out + " already installed")
+            return
+
+    # create separate folder for each app
+    io_make_dir(path_out)
+    io_change_dir(path_out)
+    shell_cmd("dtrx -q -n --one here " + file_in)
+    # remove unnecessary subfolder
+    count_dirs = 0
+    count_files = 0
+    folder_to_remove = ""
+    # count folders and files
+    for i in os.listdir(path_out):
+        if os.path.isdir(i):
+            count_dirs = count_dirs + 1
+            folder_to_remove = path_out + i
+        elif os.path.isfile(i) or os.path.islink(i):
+            count_files = count_files + 1
+        else:
+            print_status("counting files", 'err',
+                         "unknown file type: " + i)
+    # if there is only one folder, move everything one folder up
+    if count_dirs == 1 and count_files == 0 and folder_to_remove != "":
+        for j in os.listdir(folder_to_remove):
+            file_to_move = folder_to_remove + "/" + j
+            io_move_file(file_to_move, path_out)
+        # check that the folder is really empty before removing
+        if len(os.listdir(folder_to_remove)) == 0:
+            printvv("remove useless subfolder: " + folder_to_remove)
+            os.rmdir(folder_to_remove)
+        else:
+            print_status("remove folder", 'err',
+                         "folder is not empty: " + folder_to_remove)
+    else:
+        printvv("already main folder: " + path_out)
+
+    print_status(file_name_out + " is installed to " + path_out)
+
+
+def cmd_download():
+    list_packages = cache_csv_to_list()
+
+    # download all packages in list
+    for j in list_packages:
+        # set variables
+        pkg_nam = j[0]
+        pkg_ver = j[1]
+        pkg_ext = j[2]
+        pkg_sha = j[6]
+        pkg_url = j[7]
+        pkg_namlow = pkg_nam.lower()
+        pkg_basename = pkg_namlow + "_" + pkg_ver + "." + pkg_ext
+        file_pkg_src = path_downloads + pkg_basename
+        file_log = path_downloads_log + pkg_basename + ".log"
+        file_err = path_downloads_log + pkg_basename + ".err"
+
+        # force redownload
+        if args.force:
+            io_remove_file(file_pkg_src)
+
+        text_zerobytes = "File is empty, check URL path in packages CSV"
+
+        # broken download, zero bytes
+        if os.path.exists(file_pkg_src) \
+                and os.path.getsize(file_pkg_src) == 0:
+            print_status(pkg_basename, "err", text_zerobytes)
+        # already downloaded
+        elif os.path.exists(file_pkg_src):
+            print_status(pkg_basename + " already downloaded")
+            # verify hash
+            hash_file(file_pkg_src, pkg_sha)
+        # download
+        elif check_remote_host(pkg_url):
+            # check that axel is installed
+            if not find_executable("axel"):
+                error_crit("axel is not installed")
+
+            io_remove_file(file_log)
+            io_remove_file(file_err)
+
+            user_agent = "'Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+                         "AppleWebKit/537.36 (KHTML, like Gecko)" \
+                         "Chrome/103.0.0.0 Safari/537.36'"
+
+            print_status(pkg_basename + " downloading...", "dl")
+            io_change_dir(path_tmp)
+            dl_cmd = 'axel -c -U ' + user_agent + ' -n 1 ' \
+                     + '"' + pkg_url \
+                     + '" -o "' + file_pkg_src \
+                     + '" 1>"' + file_log \
+                     + '" 2>"' + file_err + '"'
+            shell_cmd(dl_cmd)
+
+            # if no error log
+            if os.path.getsize(file_err) == 0:
+                io_remove_file(file_err)
+                # verify download
+                if os.path.isfile(file_pkg_src) \
+                        and os.path.getsize(file_pkg_src) == 0:
+                    print_status(pkg_basename, "err", text_zerobytes)
+                else:
+                    # all good
+                    io_take_ownership(file_pkg_src)
+                    hash_file(file_pkg_src, pkg_sha)
+                    # todo: to make rescanning faster,
+                    # use another hashing algorythm, like md5
+            # if error log
+            else:
+                try:
+                    with open(file_err) as f:
+                        error_msg = f.readline().rstrip()
+                except OSError as error:
+                    error_crit("Error: " + str(error))
+                print_status(pkg_basename, "err", error_msg)
+
+
+def cmd_edit():
+    pass
+
+
+def cmd_enlist():
+    if args.repo:
+        uri = args.repo
+        # verify format
+        if uri.startswith("file://") or uri.startswith("https://"):
+            # check if repo already added
+            list_repos = io_file_to_list(file_repo_list)
+            # append new repo if not already in list
+            if uri in list_repos:
+                print_status("already in repo list")
+            else:
+                io_add_line_to_file(file_repo_list, uri)
+        else:
+            error_warn("Wrong URI format, must start with file:// or https://")
+    else:
+        error_warn("Please specify a repo with -r")
+
+
+def cmd_erase():
+    pass
+
+
+def cmd_exportcache():
+    list_packages = cache_csv_to_list()
+
+    # export list to stdout
+    for j in list_packages:
+        print(','.join(j))
+
+
+def cmd_init():
+    if "CYGWIN" not in platform.system():
+        if os.geteuid() != 0:
+            error_warn("This command must be run as root!")
+
+    # create basic directory and file structure
+    io_make_dir(path_cfg)
+    io_touch(file_repo_list)
+    io_make_dir(path_downloads)
+    io_make_dir(path_downloads_log)
+    io_make_dir(path_tmp)
+
+
+def cmd_install():
+    # check that dtrx is installed
+    if not find_executable("dtrx"):
+        error_crit("dtrx is not installed")
+
+    list_packages = cache_csv_to_list()
+
+    for j in list_packages:
+        # set variables
+        pkg_nam = j[0]
+        pkg_ver = j[1]
+        pkg_ext = j[2]
+        pkg_ins = j[3]
+        pkg_scr = j[4]
+        pkg_sha = j[6]
+        pkg_namlow = pkg_nam.lower()
+        pkg_basename = pkg_namlow + "_" + pkg_ver + "." + pkg_ext
+        pkg_basename_upper = pkg_nam + "_" + pkg_ver + "." + pkg_ext
+        pkg_appdir = pkg_namlow + "_" + pkg_ver + "/"
+        file_pkg_src = path_downloads + pkg_basename
+        installed_id = pkg_basename + ":" + pkg_sha
+        archive_formats = ["bz2", "gz", "lzma", "tar", "tbz", "tgz", "tlz",
+                           "xz", "zip"]
+        generic_file_formats = ["ansible-coll", "ansible-role", "app", "data",
+                                "disk", "firefox-ext", "java", "vm", "web"]
+
+        # already installed
+        if installed_id in file_installed_pkgs:
+            print_status(pkg_basename + " already installed")
+            return
+
+        print_status(pkg_basename + " installing as " + pkg_ins, 'inst')
+
+        # SCRIPT / PRE COMMAND
+        if "extract" in pkg_scr:
+            if "." in pkg_ext:
+                pkg_ext_last = pkg_ext.rsplit(".")[-1]
+                pkg_ext_first = pkg_ext.rsplit(".", 1)[0]
+                pkg_basename_new = pkg_namlow + "_" + pkg_ver \
+                                   + "." + pkg_ext_first
+
+                # extract to same folder
+                if pkg_ext_last in archive_formats:
+                    pre_extract(file_pkg_src, path_downloads,
+                                pkg_basename_new)
+                    # strip archive name from path
+                    pkg_basename = pkg_basename_new
+                else:
+                    print_status(pkg_basename, 'err', "unknown archive")
+            else:
+                print_status(pkg_basename, 'err',
+                             "missing dot in " + pkg_basename)
+
+        # DATA
+        if pkg_ins in generic_file_formats:
+            # scan for installers
+            for m in list_packages:
+                installer_pkg_nam = m[0].lower()
+                installer_pkg_ver = m[1]
+                installer_pkg_ext = m[2]
+                installer_pkg_ins = m[3]
+                if installer_pkg_ins == "installer":
+                    if pkg_namlow + pkg_ver == installer_pkg_nam + \
+                            installer_pkg_ver:
+                        print("HAS INSTALLER")
+
+            # check if extract to subfolder
+            if pkg_ext in archive_formats:
+                subfolder = "/" + pkg_appdir
+            else:
+                subfolder = "/" + pkg_basename_upper
+
+            # set installation path
+            if args.installpath:
+                path_dst = args.installpath + "/"
+            elif "background" in pkg_scr:
+                path_dst = "/usr/share/backgrounds/" \
+                           + pkg_nam.replace("wallpaper-", "") \
+                               .replace("background-", "") + "." + pkg_ext
+            elif pkg_ins == "ansible-coll":
+                path_dst = "/etc/ansible/collections/ansible_collections/" + \
+                           pkg_namlow \
+                               .replace("ansible-coll-", "") \
+                               .replace("-", ".") \
+                           + "/"
+            elif pkg_ins == "ansible-role":
+                path_dst = "/etc/ansible/roles/" + \
+                           pkg_namlow \
+                               .replace("ansible-role-", "") \
+                               .replace("-", ".") \
+                           + "/"
+            elif pkg_ins == "app":
+                path_dst = "/opt" + subfolder
+            elif pkg_ins == "disk":
+                path_dst = "/var/opt/disk_images" + subfolder
+            elif pkg_ins == "firefox-ext":
+                path_dst = "/var/opt/firefox_addons" + subfolder
+            elif pkg_ins == "java":
+                path_dst = "/opt" + subfolder
+            elif pkg_ins == "data":
+                path_dst = "/var/opt/data" + subfolder
+            elif pkg_ins == "vm":
+                path_dst = "/var/opt/vm_images" + subfolder
+            elif pkg_ins == "web":
+                path_dst = "/var/opt/www_templates" + subfolder
+            else:
+                path_dst = "/var/opt/unknown" + subfolder
+
+            # remember uninstall path
+            installed_id_with_path = installed_id + ":" + path_dst
+            io_add_line_to_file(file_installed_pkgs, installed_id_with_path)
+
+            # is an archive, extract
+            if pkg_ext in archive_formats:
+                extract_app(file_pkg_src, path_dst, pkg_basename)
+            # is not an archive, copy
+            else:
+                if pkg_ins == "disk" or pkg_ins == "firefox-ext":
+                    if io_link_file(file_pkg_src, path_dst):
+                        print_status(pkg_basename + " linked to "
+                                     + path_dst)
+                    else:
+                        print_status(pkg_basename + " already linked to "
+                                     + path_dst)
+                else:
+                    if io_copy_file(file_pkg_src, path_dst):
+                        print_status(pkg_basename + " installed to "
+                                     + path_dst)
+                    else:
+                        print_status(pkg_basename + " already installed to "
+                                     + path_dst)
+
+        # DEBIAN PACKAGE
+        elif pkg_ins == "dpkg" and pkg_ext == "deb":
+            cmd_verify = "dpkg -s " + pkg_namlow + " 2>&1"
+            # pre verify
+            deb_status_before = shell_cmd(cmd_verify)
+            if "install ok installed" in deb_status_before:
+                print_status(pkg_basename + " already installed")
+            else:
+                # install
+                shell_cmd("apt-get -qq install " + file_pkg_src + " 2>&1")
+                deb_status_after = shell_cmd(cmd_verify)
+                if "install ok installed" in deb_status_after:
+                    print_status(pkg_basename + " installed")
+                elif "is not installed" in deb_status_after:
+                    print_status(pkg_basename, 'err', "failed to install")
+                else:
+                    print_status(pkg_basename, 'err',
+                                 "installation: " + deb_status_after)
+
+        # CUSTOM INSTALLER
+        elif pkg_ins == "installer":
+            pass
+            # print_status(pkg_basename, 'err', pkg_ins + " NA")
+
+        else:
+            print_status(pkg_basename, 'err', "unknown installer: "
+                         + pkg_ins + "+" + pkg_ext)
+
+    # todo:
+    # add installed package to installed list
+
+    # already downloadet? if not download first
+    # do not verify downloaded file if already in download cache
+    # check installation type
+    # check if there is a setup script. if yes, run that after extraction
+    # add parameter "--dest -d" that is path to install/extract to
+    # only works with files.
+    # notify user: if you do this, uninstall will not work.
+    # First search PACKAGES_ROOT then PACKAGES_USER for existing packages
+    # apped to the "installed packages" list
+
+
+def cache_only_latest_version(list_packages):
+    list_names = []
+    list_versions = []
+
+    # simple list
+    for i in list_packages:
+        name = i[0].lower()
+        list_names.append(name)
+
+    for j in list_packages:
+        pkg_nam = j[0]
+        pkg_ver = j[1]
+        pkg_namlow = pkg_nam.lower()
+
+        # todo:
+        # only install the latest verison
+        pkg_count = list_names.count(pkg_namlow)
+        if pkg_count > 1:
+            print("multiversion: " + pkg_namlow + ": " + str(pkg_count))
+
+
+def cmd_list():
+    list_packages = cache_csv_to_list()
+    list_names = []
+    list_installed = []
+    list_installed = io_file_to_list(file_installed_pkgs)
+
+    # simple list
+    for i in list_packages:
+        name = i[0].lower()
+        if name not in list_names:
+            list_names.append(name)
+
+    # long list
+    if args.verbose:
+        for j in list_packages:
+            # set variables
+            pkg_nam = j[0]
+            pkg_ver = j[1]
+            pkg_ext = j[2]
+            pkg_ins = j[3]
+            pkg_des = j[5]
+            pkg_namlow = pkg_nam.lower()
+            pkg_basename = pkg_namlow + "_" + pkg_ver + "." + pkg_ext
+            file_pkg_src = path_downloads + pkg_basename
+
+            # package is downloaded
+            if os.path.exists(file_pkg_src):
+                check_d = box(color('green', "D"))
+            else:
+                check_d = box(color('', " "))
+
+            # todo: write a proper function for this, and add to show command
+            check_i = box(color('', " "))
+            # package is installed
+            for k in list_installed:
+                if k.startswith(pkg_basename):
+                    check_i = box(color('green', "I"))
+
+            # description
+            if pkg_des:
+                pkg_des = "  '" + pkg_des + "'"
+            else:
+                pkg_des = ''
+
+            print(check_d + check_i + pkg_nam.lower() + "  "
+                  + pkg_ver + "  "
+                  + pkg_ext + "/"
+                  + pkg_ins
+                  + pkg_des)
+    else:
+        for j in list_names:
+            print(j)
+
+
+def cmd_mirror():
+    # todo:
+    cache_only_latest_version(cache_csv_to_list())
+
+
+def cmd_remove():
+    pass
+
+
+def cmd_search():
+    pass
+
+
+def cmd_show():
+    list_packages = cache_csv_to_list()
+
+    # show package details
+    for j in list_packages:
+        # set variables
+        pkg_nam = j[0]
+        pkg_ver = j[1]
+        pkg_ext = j[2]
+        pkg_ins = j[3]
+        pkg_scr = j[4]
+        pkg_des = j[5]
+        pkg_sha = j[6]
+        pkg_url = j[7]
+        pkg_namlow = pkg_nam.lower()
+        pkg_basename = pkg_namlow + "_" + pkg_ver + "." + pkg_ext
+        file_pkg_src = path_downloads + pkg_basename
+
+        if args.downloadpath:
+            if os.path.exists(file_pkg_src):
+                print(file_pkg_src)
+            else:
+                print("Download-Path is empty for " + pkg_namlow)
+        else:
+            print("Package: " + pkg_nam)
+            print("Version: " + pkg_ver)
+            if os.path.exists(file_pkg_src):
+                print("Downloaded: " + "Yes")
+            else:
+                print("Downloaded: " + "No")
+            if os.path.exists(file_pkg_src):
+                print("Download-Path: " + file_pkg_src)
+            else:
+                print("Download-Path: NA")
+            print("Installed: NA")
+            print("Extension: " + pkg_ext)
+            print("Installer: " + pkg_ins)
+            if pkg_scr == "":
+                print("Script: None")
+            else:
+                print("Script: " + pkg_scr)
+            print("Description: " + pkg_des)
+            print("SHA256: " + pkg_sha)
+            print("URL: " + pkg_url)
+            print("")
+
+
+def cmd_update():
+    # remove old cache and create new cache dir
+    io_remove_dir(path_list_cache)
+    io_make_dir(path_list_cache)
+
+    list_repo_cache = []
+
+    # download each repo's individual package list file
+    each_repo_uri = io_file_to_list(file_repo_list)
+    for uri in each_repo_uri:
+        printvv("repo uri is: " + uri)
+
+        # ignore comments adn empty lines
+        if uri.startswith("#") or uri == "":
+            pass
+
+        # from file
+        elif uri.startswith("file://"):
+            file_repo_src = uri.replace("file://", "")
+            file_repo_des = path_list_cache + uri_to_reponame(uri)
+            io_copy_file(file_repo_src, file_repo_des)
+            if verify_csv(file_repo_src):
+                # append current repo to repo-cache list
+                list_repo_cache = list_repo_cache + packages_csv_to_list(
+                    file_repo_des)
+                print_status(uri)
+            else:
+                # remove broken cache file
+                io_remove_file(file_repo_des)
+
+        # from website
+        elif uri.startswith("https://"):
+            url_repo_src = uri + file_pkgs
+            file_repo_des = path_list_cache + uri_to_reponame(uri)
+            if io_download_file(url_repo_src, file_repo_des):
+                if verify_csv(file_repo_des):
+                    # append current repo to repo-cache list
+                    list_repo_cache = list_repo_cache + packages_csv_to_list(
+                        file_repo_des)
+                    print_status(uri)
+                else:
+                    # remove broken cache file
+                    io_remove_file(file_repo_des)
+
+        else:
+            print_status(uri, 'err', "is not a valid uri: " + uri)
+
+    # create to local packages cache
+    # sort by lower case file names
+    list_repo_cache.sort(key=lambda x: x[0].lower())
+    # save cache to file
+    file_repo_cache_tmp = file_repo_cache + "_tmp"
+    io_remove_file(file_repo_cache)
+    io_remove_file(file_repo_cache_tmp)
+    # todo: with open(file_repo_cache_tmp, 'w', newline='') as repo_cache:
+    with open(file_repo_cache_tmp, 'w') as repo_cache:
+        write = csv.writer(repo_cache)
+        write.writerows(list_repo_cache)
+    # remove duplicates
+    with open(file_repo_cache_tmp, 'r') as repo_cache_in, \
+            open(file_repo_cache, 'w') as repo_cache_out:
+        seen_row = set()  # set for fast lookup
+        for row in repo_cache_in:
+            if row in seen_row:
+                continue  # skip duplicate
+            seen_row.add(row)
+            repo_cache_out.write(row)
+    # clean up temp
+    io_remove_file(file_repo_cache_tmp)
+
+
+def program_selector():
+    # commands
+    case = args.command
+    if case == "download":
+        cmd_init()
+        cmd_download()
+    elif case == "edit":
+        cmd_init()
+        cmd_edit()
+    elif case == "enlist":
+        cmd_init()
+        cmd_enlist()
+    elif case == "erase":
+        cmd_init()
+        cmd_erase()
+    elif case == "exportcache":
+        cmd_exportcache()
+    elif case == "init":
+        cmd_init()
+    elif case == "install":
+        cmd_init()
+        cmd_download()
+        cmd_install()
+    elif case == "list":
+        cmd_list()
+    elif case == "mirror":
+        cmd_mirror()
+    elif case == "remove":
+        cmd_init()
+        cmd_remove()
+    elif case == "search":
+        cmd_search()
+    elif case == "show":
+        cmd_show()
+    elif case == "update":
+        cmd_init()
+        cmd_update()
+
+
+def main():
+    program_selector()
+
+
+# MAIN ########################################################################
+
+main()
