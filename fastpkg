@@ -59,7 +59,8 @@ parser.add_argument(
 
 parser.add_argument(
     "-p", "--package",
-    help="Name of a package or packages. Comma separate multible packages. \
+    help="Name of a package or packages. Separate multible packages by a \
+    space and in quotation marks. \
     Specify a version with underscore: <PACKAGE>_<VERSION>",
     metavar='PACKAGE_NAME',
     type=str,
@@ -289,6 +290,9 @@ def printvvv(text):
 
 
 def print_status(text, msg_type="", error_text="unknown"):
+    text = str(text)
+    error_text = str(error_text)
+
     if msg_type == "err":
         print(box(color('red', "FAIL")) + text + " - Error: " + error_text)
     elif msg_type == "warn":
@@ -326,7 +330,11 @@ def io_change_dir(target_dir):
 def io_take_ownership(des_file):
     # only remove in allowed path
     if des_file.startswith(path_base) or des_file == file_repo_list:
-        os.chmod(des_file, 0o644)
+        if "CYGWIN" in platform.system():
+            # must be executable or won't be able to install applications
+            os.chmod(des_file, 0o755)
+        else:
+            os.chmod(des_file, 0o644)
     else:
         error_crit("take_ownership: forbidden to chmod outside of "
                    + path_base + " and " + file_repo_list + " file: "
@@ -492,7 +500,7 @@ def shell_cmd(cmd):
     p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
     stdout, stderr = p.communicate()
 
-    if stderr != "":
+    if stderr:
         if stdout:
             print_status("stdout", "err", stdout)
         print_status("stderr", "err", stderr)
@@ -671,31 +679,34 @@ def cache_csv_to_list():
     # filter for specific packages
     if args.package:
         list_rows_filtered = []
+        # iterate over all repos
         for i in range(len(list_rows)):
-            # ignore case on input package string
-            pkg_search = args.package.lstrip('=').lower()
-            pkg_nam = str(list_rows[i][0]).lower()
-            pkg_ver = str(list_rows[i][1])
-            text_search = ": " + pkg_nam + " " + pkg_ver
-            # exact match
-            if pkg_search == pkg_nam:
-                printvvv("search: exact match" + text_search)
-                list_rows_filtered.append(list_rows[i])
-            # wildcard match
-            elif '*' in pkg_search:
-                pkg_search_wildcard = pkg_search.replace('*', '')
-                if pkg_nam.startswith(pkg_search_wildcard):
-                    printvvv("search: wildcard match" + text_search)
-                    list_rows_filtered.append(list_rows[i])
-            # match version
-            elif '_' in pkg_search:
-                pkg_search_split = pkg_search.split("_")
-                pkg_search_pkg = pkg_search_split[0]
-                pkg_search_ver = pkg_search_split[1]
+            # iterate over comma seperated packages
+            for current_pkg in args.package.split(' '):
+                # ignore case on input package string
+                pkg_search = current_pkg.lstrip('=').lower()
+                pkg_nam = str(list_rows[i][0]).lower()
+                pkg_ver = str(list_rows[i][1])
+                text_search = ": " + pkg_nam + " " + pkg_ver
                 # exact match
-                if pkg_search_pkg == pkg_nam and pkg_search_ver == pkg_ver:
-                    printvvv("search: version match" + text_search)
+                if pkg_search == pkg_nam:
+                    printvvv("search: exact match" + text_search)
                     list_rows_filtered.append(list_rows[i])
+                # wildcard match
+                elif '*' in pkg_search:
+                    pkg_search_wildcard = pkg_search.replace('*', '')
+                    if pkg_nam.startswith(pkg_search_wildcard):
+                        printvvv("search: wildcard match" + text_search)
+                        list_rows_filtered.append(list_rows[i])
+                # match version
+                elif '_' in pkg_search:
+                    pkg_search_split = pkg_search.split("_")
+                    pkg_search_pkg = pkg_search_split[0]
+                    pkg_search_ver = pkg_search_split[1]
+                    # exact match
+                    if pkg_search_pkg == pkg_nam and pkg_search_ver == pkg_ver:
+                        printvvv("search: version match" + text_search)
+                        list_rows_filtered.append(list_rows[i])
 
         if not list_rows_filtered:
             print("Package '" + args.package + "' not found")
@@ -834,6 +845,7 @@ def extract_app(file_in, path_out, file_name_out):
 
 def cmd_download():
     list_packages = cache_csv_to_list()
+    throw_error = False
 
     # download all packages in list
     for j in list_packages:
@@ -863,7 +875,8 @@ def cmd_download():
         elif os.path.exists(file_pkg_src):
             print_status(pkg_basename + " already downloaded")
             # verify hash
-            hash_file(file_pkg_src, pkg_sha)
+            if not hash_file(file_pkg_src, pkg_sha):
+                throw_error = True
         # download
         elif check_remote_host(pkg_url):
             # check that axel is installed
@@ -896,7 +909,8 @@ def cmd_download():
                 else:
                     # all good
                     io_take_ownership(file_pkg_src)
-                    hash_file(file_pkg_src, pkg_sha)
+                    if not hash_file(file_pkg_src, pkg_sha):
+                        throw_error = True
                     # todo: to make rescanning faster,
                     # use another hashing algorythm, like md5
             # if error log
@@ -907,6 +921,9 @@ def cmd_download():
                 except OSError as error:
                     error_crit("Error: " + str(error))
                 print_status(pkg_basename, "err", error_msg)
+
+    if throw_error:
+        error_crit("Some packages failed to verify")
 
 
 def cmd_edit():
@@ -1030,7 +1047,10 @@ def cmd_install():
 
             # set installation path
             if args.installpath:
-                path_dst = args.installpath + "/"
+                if pkg_ext in archive_formats:
+                    path_dst = args.installpath + "/"
+                else:
+                    path_dst = args.installpath + "/" + pkg_basename_upper
             elif "background" in pkg_scr:
                 path_dst = "/usr/share/backgrounds/" \
                            + pkg_nam.replace("wallpaper-", "") \
@@ -1064,10 +1084,6 @@ def cmd_install():
             else:
                 path_dst = "/var/opt/unknown" + subfolder
 
-            # remember uninstall path
-            installed_id_with_path = installed_id + ":" + path_dst
-            io_add_line_to_file(file_installed_pkgs, installed_id_with_path)
-
             # is an archive, extract
             if pkg_ext in archive_formats:
                 extract_app(file_pkg_src, path_dst, pkg_basename)
@@ -1087,6 +1103,10 @@ def cmd_install():
                     else:
                         print_status(pkg_basename + " already installed to "
                                      + path_dst)
+
+            # remember uninstall path
+            installed_id_with_path = installed_id + ":" + path_dst
+            io_add_line_to_file(file_installed_pkgs, installed_id_with_path)
 
         # DEBIAN PACKAGE
         elif pkg_ins == "dpkg" and pkg_ext == "deb":
@@ -1240,7 +1260,9 @@ def cmd_show():
             if os.path.exists(file_pkg_src):
                 print(file_pkg_src)
             else:
-                print("Download-Path is empty for " + pkg_namlow)
+                error_warn("Download-Path is empty for '" + pkg_namlow
+                           + "', try first: 'fastpkg -p " + pkg_namlow
+                           + " download'")
         else:
             print("Package: " + pkg_nam)
             print("Version: " + pkg_ver)
