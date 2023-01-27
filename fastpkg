@@ -6,11 +6,30 @@
 
 import argparse
 import platform
+import os
+from subprocess import PIPE, Popen
 
 py_ver = platform.python_version()
 
 if py_ver.startswith("3"):
     import argcomplete  # noqa
+
+# DETERMAINE OS ROOT ##########################################################
+
+path_root = "/"
+# replace root path if Cygwin/Windows
+if "CYGWIN" in platform.system():
+    cmd_get_win_root = "cygpath -u " + os.environ['HOMEDRIVE']
+    # convert posix to windows path
+    osdetect_p = Popen(cmd_get_win_root, shell=True, stdout=PIPE, stderr=PIPE)
+    osdetect_stdout, osdetect_stderr = osdetect_p.communicate()
+    if osdetect_stderr:
+        if osdetect_stdout:
+            print("stdout: " + osdetect_stdout)
+        print("stderr: " + osdetect_stderr)
+        print("Detect OS failed, command: '" + cmd_get_win_root + "'")
+        exit(1)
+    path_root = osdetect_stdout.rstrip('\n') + "/"
 
 # BASIC STATIC VARIABLES ######################################################
 
@@ -27,6 +46,13 @@ file_repo_list = path_cfg + "fastpkg.list"
 file_cfg = path_cfg + "config.cfg"
 file_pkgs = "packages.csv"
 file_pkgs_gpg = file_pkgs + ".gpg"
+
+# default installation folders
+inst_path_backgrounds = path_root + "usr/share/backgrounds/"
+
+# replace if Windows
+if "CYGWIN" in platform.system():
+    inst_path_backgrounds = path_root + "WINDOWS/Web/Wallpaper/"
 
 # PARSER INIT #################################################################
 
@@ -146,6 +172,19 @@ parser_install.add_argument(
     type=str
 )
 
+parser_install.add_argument(
+    "-o", "--overwrite",
+    help="Install files, even if the target folder already exists.",
+    action='store_true'
+)
+
+parser_install.add_argument(
+    "-r", "--rename",
+    help="Override the automatic naming of files and paths. Choose your own \
+    name. Only works in conjunction with the --installpath flag.",
+    action='store_true'
+)
+
 parser_list = subparsers.add_parser(
     "list",
     help="List all packages. Use -v to see if the packages are \
@@ -217,13 +256,11 @@ if not args.command:
 if py_ver.startswith("3"):
     import requests  # noqa
     from http.client import responses
-import os
 import csv
 import hashlib
 import shutil
 import string
 from distutils.spawn import find_executable
-from subprocess import PIPE, Popen
 
 # STATIC VARIABLES ############################################################
 
@@ -327,14 +364,15 @@ def io_change_dir(target_dir):
         error_crit("change_dir: path does not exist: " + target_dir)
 
 
-def io_take_ownership(des_file):
-    # only remove in allowed path
-    if des_file.startswith(path_base) or des_file == file_repo_list:
-        if "CYGWIN" in platform.system():
-            # must be executable or won't be able to install applications
-            os.chmod(des_file, 0o755)
-        else:
-            os.chmod(des_file, 0o644)
+def io_chmod(des_file):
+    # must be executable or won't be able to install applications on Windows
+    if "CYGWIN" in platform.system():
+        os.chmod(des_file, 0o755)
+        printvvv("take_ownership: 755 " + des_file)
+    # only change permissions in allowed path
+    elif des_file.startswith(path_base) or des_file == file_repo_list:
+        os.chmod(des_file, 0o644)
+        printvvv("take_ownership: 644 " + des_file)
     else:
         error_crit("take_ownership: forbidden to chmod outside of "
                    + path_base + " and " + file_repo_list + " file: "
@@ -343,7 +381,7 @@ def io_take_ownership(des_file):
 
 def io_remove_file(des_file):
     # only remove in allowed path
-    if des_file.startswith(path_base):
+    if des_file.startswith(path_base) or "CYGWIN" in platform.system:
         try:
             if os.path.isfile(des_file):
                 os.remove(des_file)
@@ -359,7 +397,7 @@ def io_remove_file(des_file):
 
 def io_remove_dir(directory):
     # only remove in allowed path
-    if directory.startswith(path_base):
+    if directory.startswith(path_base) or "CYGWIN" in platform.system:
         try:
             if os.path.exists(directory):
                 shutil.rmtree(directory)
@@ -381,11 +419,12 @@ def io_make_dir(directory):
 
 def io_touch(des_file):
     # only change file in allowed path
-    if des_file.startswith(path_base) or des_file == file_repo_list:
+    if des_file.startswith(path_base) or \
+            des_file == file_repo_list or \
+            "CYGWIN" in platform.system:
         if not os.path.isfile(des_file):
             os.mknod(des_file)
             printvvv("touch: OK " + des_file)
-        io_take_ownership(des_file)
     else:
         error_crit("touch: forbidden to change files outside of "
                    + path_base + " and " + file_repo_list + " file: "
@@ -746,6 +785,9 @@ def packages_list_to_data(list_packages):
 
 
 def check_remote_host(url):
+    if "CYGWIN" in platform.system():
+        error_crit("Cygwin is not supported for online download")
+
     header_size = {"Range": "bytes=0-100"}
     try:
         # only try to download a small part
@@ -791,7 +833,7 @@ def pre_extract(file_in, path_out, file_name_out):
     io_change_dir(path_out)
     shell_cmd("dtrx -q -n --one rename " + file_in)
     if os.path.isfile(file_out):
-        io_take_ownership(file_out)
+        io_chmod(file_out)
         print_status(file_name_out + " extracted")
     else:
         error_crit("extract: can not find file: " + file_out)
@@ -804,7 +846,7 @@ def extract_app(file_in, path_out, file_name_out):
             print_status(file_name_out + " extracting", 'inst')
             printvvv("extract_app: directory exists but is empty")
         else:
-            print_status(file_name_out + " already installed")
+            print_status(file_name_out + " folder already exists")
             return
 
     # create separate folder for each app
@@ -830,6 +872,7 @@ def extract_app(file_in, path_out, file_name_out):
         for j in os.listdir(folder_to_remove):
             file_to_move = folder_to_remove + "/" + j
             io_move_file(file_to_move, path_out)
+            io_chmod(path_out + "/" + j)
         # check that the folder is really empty before removing
         if len(os.listdir(folder_to_remove)) == 0:
             printvv("remove useless subfolder: " + folder_to_remove)
@@ -908,7 +951,6 @@ def cmd_download():
                     print_status(pkg_basename, "err", text_zerobytes)
                 else:
                     # all good
-                    io_take_ownership(file_pkg_src)
                     if not hash_file(file_pkg_src, pkg_sha):
                         throw_error = True
                     # todo: to make rescanning faster,
@@ -997,12 +1039,16 @@ def cmd_install():
         archive_formats = ["bz2", "gz", "lzma", "tar", "tbz", "tgz", "tlz",
                            "xz", "zip"]
         generic_file_formats = ["ansible-coll", "ansible-role", "app", "data",
-                                "disk", "firefox-ext", "java", "vm", "web"]
+                                "disk", "firefox-ext", "java", "vm", "web",
+                                "winapp", "windata"]
 
         # already installed
         if installed_id in file_installed_pkgs:
-            print_status(pkg_basename + " already installed")
-            return
+            if args.overwrite:
+                print_status(pkg_basename + " overwriting and appending files")
+            else:
+                print_status(pkg_basename + " already installed")
+                return
 
         print_status(pkg_basename + " installing as " + pkg_ins, 'inst')
 
@@ -1010,21 +1056,23 @@ def cmd_install():
         if "extract" in pkg_scr:
             if "." in pkg_ext:
                 pkg_ext_last = pkg_ext.rsplit(".")[-1]
-                pkg_ext_first = pkg_ext.rsplit(".", 1)[0]
-                pkg_basename_new = pkg_namlow + "_" + pkg_ver \
-                                   + "." + pkg_ext_first
+                # todo: remove? pkg_ext_first = pkg_ext.rsplit(".", 1)[0]
+                old_ext = '.' + pkg_ext_last
+                pkg_basename = pkg_basename.rstrip(old_ext)
 
                 # extract to same folder
                 if pkg_ext_last in archive_formats:
                     pre_extract(file_pkg_src, path_downloads,
-                                pkg_basename_new)
-                    # strip archive name from path
-                    pkg_basename = pkg_basename_new
+                                pkg_basename)
+                    # strip archive name from other paths
+                    pkg_basename_upper = pkg_basename_upper.rstrip(old_ext)
+                    file_pkg_src = file_pkg_src.rstrip(old_ext)
                 else:
                     print_status(pkg_basename, 'err', "unknown archive")
             else:
                 print_status(pkg_basename, 'err',
-                             "missing dot in " + pkg_basename)
+                             "missing dot in " + pkg_basename
+                             + ", example: 'exe.zip'")
 
         # DATA
         if pkg_ins in generic_file_formats:
@@ -1047,14 +1095,16 @@ def cmd_install():
 
             # set installation path
             if args.installpath:
-                if pkg_ext in archive_formats:
+                if args.rename:
+                    path_dst = args.installpath
+                elif pkg_ext in archive_formats:
                     path_dst = args.installpath + "/"
                 else:
                     path_dst = args.installpath + "/" + pkg_basename_upper
             elif "background" in pkg_scr:
-                path_dst = "/usr/share/backgrounds/" \
-                           + pkg_nam.replace("wallpaper-", "") \
-                               .replace("background-", "") + "." + pkg_ext
+                path_dst = inst_path_backgrounds + \
+                           pkg_nam.replace("wallpaper-", "").replace(
+                               "background-", "") + "." + pkg_ext
             elif pkg_ins == "ansible-coll":
                 path_dst = "/etc/ansible/collections/ansible_collections/" + \
                            pkg_namlow \
@@ -1081,6 +1131,10 @@ def cmd_install():
                 path_dst = "/var/opt/vm_images" + subfolder
             elif pkg_ins == "web":
                 path_dst = "/var/opt/www_templates" + subfolder
+            elif pkg_ins == "winapp":
+                path_dst = path_root + "opt" + subfolder
+            elif pkg_ins == "windata":
+                path_dst = path_root + "data" + subfolder
             else:
                 path_dst = "/var/opt/unknown" + subfolder
 
@@ -1098,6 +1152,7 @@ def cmd_install():
                                      + path_dst)
                 else:
                     if io_copy_file(file_pkg_src, path_dst):
+                        io_chmod(path_dst)
                         print_status(pkg_basename + " installed to "
                                      + path_dst)
                     else:
