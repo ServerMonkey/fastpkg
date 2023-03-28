@@ -51,10 +51,10 @@ Version: $VERSION
 Section: net
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.0),
+Recommends: python3 (>= 3.0),
  python3-argcomplete (>=1.8.1),
  axel (>=2.17),
- dtrx (>=8.0.1)
+ dtrx (>=7.1.3)
 Maintainer: Bodo Endres <dev@muspekaren.se>
 Description: $DESCRIPTION
 " >"$PATH_TARGET/control"

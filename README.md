@@ -1,4 +1,4 @@
-fastpkg(1) -- Simple suckless package manager
+fastpkg(1) -- A complementary package manager
 =============================================
 
 ## SYNOPSIS
@@ -9,7 +9,7 @@ fastpkg(1) -- Simple suckless package manager
 
 ## DESCRIPTION
 
-Add packages directly from their original URL.
+A complementary package manager, turn any URL-file into a package
 
 ## OPTIONS
 

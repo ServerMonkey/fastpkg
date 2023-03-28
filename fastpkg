@@ -7,12 +7,22 @@
 import argparse
 import platform
 import os
+import sys
 from subprocess import PIPE, Popen
 
 py_ver = platform.python_version()
+argcomplete_exists = True
+try:
+    import argcomplete
+except ImportError:
+    argcomplete_exists = False
 
-if py_ver.startswith("3"):
-    import argcomplete  # noqa
+
+# BASIC #######################################################################
+
+def print_err(text):
+    sys.stderr.write(str(text) + '\n')
+
 
 # DETERMAINE OS ROOT ##########################################################
 
@@ -23,11 +33,13 @@ if "CYGWIN" in platform.system():
     # convert posix to windows path
     osdetect_p = Popen(cmd_get_win_root, shell=True, stdout=PIPE, stderr=PIPE)
     osdetect_stdout, osdetect_stderr = osdetect_p.communicate()
+    osdetect_stdout = str(osdetect_stdout)
+    osdetect_stderr = str(osdetect_stderr)
     if osdetect_stderr:
         if osdetect_stdout:
-            print("stdout: " + osdetect_stdout)
-        print("stderr: " + osdetect_stderr)
-        print("Detect OS failed, command: '" + cmd_get_win_root + "'")
+            print_err("stdout: " + osdetect_stdout)
+        print_err("stderr: " + osdetect_stderr)
+        print_err("Detect OS failed, command: '" + cmd_get_win_root + "'")
         exit(1)
     path_root = osdetect_stdout.rstrip('\n') + "/"
 
@@ -95,6 +107,13 @@ parser.add_argument(
 parser.add_argument(
     "-q", "--quiet",
     help="Supress all confirming output, show only errors and warnings.",
+    action='store_true'
+)
+
+parser.add_argument(
+    "-s", "--skip",
+    help="Skip hash verification, only use if you already know that all \
+    files are correctly downloaded.",
     action='store_true'
 )
 
@@ -185,6 +204,13 @@ parser_install.add_argument(
     action='store_true'
 )
 
+parser_install.add_argument(
+    "-n", "--noversionrename",
+    help="Override the automatic naming of files and paths. Will use the \
+    automatic name but without the '_VERSION'",
+    action='store_true'
+)
+
 parser_list = subparsers.add_parser(
     "list",
     help="List all packages. Use -v to see if the packages are \
@@ -242,7 +268,7 @@ parser_update = subparsers.add_parser(
 )
 
 # init TAB complete and parsers
-if py_ver.startswith("3"):
+if argcomplete_exists:
     argcomplete.autocomplete(parser)
 
 args = parser.parse_args()
@@ -260,7 +286,6 @@ import csv
 import hashlib
 import shutil
 import string
-from distutils.spawn import find_executable
 
 # STATIC VARIABLES ############################################################
 
@@ -331,7 +356,7 @@ def print_status(text, msg_type="", error_text="unknown"):
     error_text = str(error_text)
 
     if msg_type == "err":
-        print(box(color('red', "FAIL")) + text + " - Error: " + error_text)
+        print_err(box(color('red', "FAIL")) + text + " - Error: " + error_text)
     elif msg_type == "warn":
         print(box(color('yellow', "WARN")) + text + " - " + error_text)
     elif msg_type == "dl":
@@ -347,12 +372,12 @@ def print_status(text, msg_type="", error_text="unknown"):
 
 
 def error_warn(error_message):
-    print(error_message)
+    print_err(error_message)
     exit(1)
 
 
 def error_crit(error_message):
-    print(color('red', "ERROR, aborting:") + " " + error_message)
+    print_err(color('red', "ERROR, aborting:") + " " + error_message)
     exit(1)
 
 
@@ -371,8 +396,8 @@ def io_chmod(des_file):
         printvvv("take_ownership: 755 " + des_file)
     # only change permissions in allowed path
     elif des_file.startswith(path_base) or des_file == file_repo_list:
-        os.chmod(des_file, 0o644)
-        printvvv("take_ownership: 644 " + des_file)
+        os.chmod(des_file, 0o755)
+        printvvv("take_ownership: 755 " + des_file)
     else:
         error_crit("take_ownership: forbidden to chmod outside of "
                    + path_base + " and " + file_repo_list + " file: "
@@ -397,6 +422,7 @@ def io_remove_file(des_file):
 
 def io_remove_dir(directory):
     # only remove in allowed path
+    directory = str(directory)
     if directory.startswith(path_base) or "CYGWIN" in platform.system:
         try:
             if os.path.exists(directory):
@@ -525,7 +551,7 @@ def io_download_file(url, file_out):
     if check_remote_host(url):
         printvvv("download_file: " + text_info)
         try:
-            data = requests.get(url, timeout=10)
+            data = requests.get(url, timeout=30)
             if data.status_code == 200:
                 open(file_out, 'wb').write(data.content)
         except Exception as error:
@@ -538,9 +564,11 @@ def shell_cmd(cmd):
     printvv("SHELL: " + cmd)
     p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
     stdout, stderr = p.communicate()
+    stdout = str(stdout).rstrip("b''")
+    stderr = str(stderr).rstrip("b''")
 
-    if stderr:
-        if stdout:
+    if stderr != '':
+        if stdout != '':
             print_status("stdout", "err", stdout)
         print_status("stderr", "err", stderr)
         error_crit("shell_cmd failed '" + cmd + "'")
@@ -550,23 +578,38 @@ def shell_cmd(cmd):
 
 def hash_file(file_path, correct_hash):
     file_name = os.path.basename(file_path)
+    file_hash = ""
+
+    # need to read to a smaller memory buffer, or with fail on large files
+    stream_buffer = 65536
+    file_hash_bytes = hashlib.sha256()
 
     try:
         with open(file_path, 'rb') as f:
-            file_bytes = f.read()
-            file_hash = hashlib.sha256(file_bytes).hexdigest()
+            while True:
+                file_stream = f.read(stream_buffer)
+                if not file_stream:
+                    break
+                file_hash_bytes.update(file_stream)
+
+            try:
+                file_hash = file_hash_bytes.hexdigest()
+            except Exception as error:
+                error_crit("hash_file: hexdigest() failed " + str(error))
+
         printvvv("hash_file: read hash OK " + file_path)
     except Exception as error:
-        error_crit("hash_file: " + file_path + " " + str(error))
+        printvvv("hash_file: read hash failed " + str(error))
 
-    if file_hash == correct_hash:
+    if str(file_hash) == correct_hash:
         print_status(file_name + " hash verified")
         return True
     else:
         print_status(file_name, "err", "hash does not match, removing")
-        io_remove_file(file_path)
-        printvv("hash details: " + file_path + " is: "
-                + file_hash + " should be: " + correct_hash)
+        # io_remove_file(file_path)
+        printvv("hash details of " + file_path)
+        printv("file hash is : " + str(file_hash))
+        printv("but should be: " + correct_hash)
         return False
 
 
@@ -605,8 +648,8 @@ def verify_csv(des_file):
 
     try:
         csv_file = open(des_file, 'rt')
-        # todo: remove dialect string?
-        dialect = csv.Sniffer().sniff(csv_file.read(3072), delimiters=",")
+        # verify csv data
+        csv.Sniffer().sniff(csv_file.read(), delimiters=",")
         # Perform various checks on the dialect (e.g., lineseparator,
         # delimiter) to make sure it's sane
         # reset the read position to start of file before reading any entries
@@ -630,14 +673,14 @@ def verify_repo_list(list_repo):
         for cell in list_repo[row]:
             pkg_name = list_repo[row][0]
             if pkg_name == "":
-                print("error in first column, cell is empty")
+                print_err("error in first column, cell is empty")
                 return False
             # check for empty cells, ignore column "SCRIPT"
             elif count_cells != 4 and cell == "":
-                print("error in row "
-                      + "'" + pkg_name + "'"
-                      + " cell " + str(count_cells + 1)
-                      + ", missing value")
+                print_err("error in row "
+                          + "'" + pkg_name + "'"
+                          + " cell " + str(count_cells + 1)
+                          + ", missing value")
                 return False
             count_cells = count_cells + 1
         count_rows = count_rows + 1
@@ -748,7 +791,7 @@ def cache_csv_to_list():
                         list_rows_filtered.append(list_rows[i])
 
         if not list_rows_filtered:
-            print("Package '" + args.package + "' not found")
+            print_err("Package '" + args.package + "' not found")
             exit(1)
 
         return list_rows_filtered
@@ -758,6 +801,64 @@ def cache_csv_to_list():
 
     else:
         error_warn("No packages selected")
+
+
+def cache_csv_to_list_latest_version():
+    list_packages = cache_csv_to_list()
+    list_rows_filtered = []
+
+    # find each individual program
+    list_pkg_groups = []
+    for m in list_packages:
+        pkg_uniq = m[0].lower()
+        if pkg_uniq not in list_pkg_groups:
+            list_pkg_groups.append(pkg_uniq)
+
+    # for all versions of all packages
+    for current_pkg_group in list_pkg_groups:
+        printvvv("filter by latest version: " + current_pkg_group)
+        # for all versions of each individual package
+        dict_current_pkg_group_sortable = {}
+        for j in list_packages:
+            pkg_nam = j[0]
+            pkg_ver = j[1]
+            pkg_namlow = pkg_nam.lower()
+
+            # only iterate over one group at a time
+            if pkg_namlow == current_pkg_group:
+                # find maximum length of each sub versions
+                # for ver_sub in pkg_ver:
+                ver_sub = pkg_ver
+                current_dots = ver_sub.count('.')
+                max_dots = 30
+                for char in ver_sub:
+                    if char not in "0123456789.":
+                        ver_sub = ver_sub.replace(char, '0')
+                if current_dots < max_dots:
+                    dots_to_add = max_dots - current_dots
+                    ver_sub = ver_sub + ".0" * dots_to_add
+                # create a new dict, which is now sortable by verion
+                dict_current_pkg_group_sortable.update({ver_sub: j})
+
+        # sort by latest version
+        list_latest_version = []
+        for key in sorted(dict_current_pkg_group_sortable,
+                          key=lambda s: [int(u) for u in s.split('.')]):
+            list_latest_version.append(
+                dict_current_pkg_group_sortable.get(key))
+
+        # debug list_latest_version
+        # for t in list_latest_version:
+        #     printvvv("  " + str(t[1]))
+
+        # get only the package with the latest version
+        latest_version = list_latest_version[-1]
+        list_rows_filtered.append(latest_version)
+
+    # return latest version for each package
+    for m in list_rows_filtered:
+        printvvv("latest version: " + m[0] + " " + m[1])
+    return list_rows_filtered
 
 
 def packages_list_to_data(list_packages):
@@ -840,8 +941,11 @@ def pre_extract(file_in, path_out, file_name_out):
 
 
 def extract_app(file_in, path_out, file_name_out):
+    # force overwriting of files
+    if args.overwrite:
+        print_status(file_name_out + " overwriting and appending files")
     # do not reinstall
-    if os.path.exists(path_out):
+    elif os.path.exists(path_out):
         if not os.listdir(path_out):
             print_status(file_name_out + " extracting", 'inst')
             printvvv("extract_app: directory exists but is empty")
@@ -853,6 +957,9 @@ def extract_app(file_in, path_out, file_name_out):
     io_make_dir(path_out)
     io_change_dir(path_out)
     shell_cmd("dtrx -q -n --one here " + file_in)
+    # set default windows permissions
+    if "CYGWIN" in platform.system():
+        shell_cmd("chmod -R 750 " + path_out)
     # remove unnecessary subfolder
     count_dirs = 0
     count_files = 0
@@ -872,7 +979,6 @@ def extract_app(file_in, path_out, file_name_out):
         for j in os.listdir(folder_to_remove):
             file_to_move = folder_to_remove + "/" + j
             io_move_file(file_to_move, path_out)
-            io_chmod(path_out + "/" + j)
         # check that the folder is really empty before removing
         if len(os.listdir(folder_to_remove)) == 0:
             printvv("remove useless subfolder: " + folder_to_remove)
@@ -887,7 +993,7 @@ def extract_app(file_in, path_out, file_name_out):
 
 
 def cmd_download():
-    list_packages = cache_csv_to_list()
+    list_packages = cache_csv_to_list_latest_version()
     throw_error = False
 
     # download all packages in list
@@ -917,13 +1023,17 @@ def cmd_download():
         # already downloaded
         elif os.path.exists(file_pkg_src):
             print_status(pkg_basename + " already downloaded")
+            # make sure permissions are correct
+            io_chmod(file_pkg_src)
             # verify hash
-            if not hash_file(file_pkg_src, pkg_sha):
+            if args.skip:
+                print_status(pkg_basename + " skip hash verification")
+            elif not hash_file(file_pkg_src, pkg_sha):
                 throw_error = True
         # download
         elif check_remote_host(pkg_url):
             # check that axel is installed
-            if not find_executable("axel"):
+            if not shell_cmd("command -v axel"):
                 error_crit("axel is not installed")
 
             io_remove_file(file_log)
@@ -951,7 +1061,9 @@ def cmd_download():
                     print_status(pkg_basename, "err", text_zerobytes)
                 else:
                     # all good
-                    if not hash_file(file_pkg_src, pkg_sha):
+                    if args.skip:
+                        print_status(pkg_basename + " skip hash verification")
+                    elif not hash_file(file_pkg_src, pkg_sha):
                         throw_error = True
                     # todo: to make rescanning faster,
                     # use another hashing algorythm, like md5
@@ -969,7 +1081,7 @@ def cmd_download():
 
 
 def cmd_edit():
-    pass
+    error_crit("Not yet implemented")
 
 
 def cmd_enlist():
@@ -991,11 +1103,11 @@ def cmd_enlist():
 
 
 def cmd_erase():
-    pass
+    error_crit("Not yet implemented")
 
 
 def cmd_exportcache():
-    list_packages = cache_csv_to_list()
+    list_packages = cache_csv_to_list_latest_version()
 
     # export list to stdout
     for j in list_packages:
@@ -1017,10 +1129,10 @@ def cmd_init():
 
 def cmd_install():
     # check that dtrx is installed
-    if not find_executable("dtrx"):
+    if not shell_cmd("command -v dtrx"):
         error_crit("dtrx is not installed")
 
-    list_packages = cache_csv_to_list()
+    list_packages = cache_csv_to_list_latest_version()
 
     for j in list_packages:
         # set variables
@@ -1033,7 +1145,9 @@ def cmd_install():
         pkg_namlow = pkg_nam.lower()
         pkg_basename = pkg_namlow + "_" + pkg_ver + "." + pkg_ext
         pkg_basename_upper = pkg_nam + "_" + pkg_ver + "." + pkg_ext
+        pkg_basename_upper_no_ver = pkg_nam + "." + pkg_ext
         pkg_appdir = pkg_namlow + "_" + pkg_ver + "/"
+        pkg_appdir_no_ver = pkg_namlow + "/"
         file_pkg_src = path_downloads + pkg_basename
         installed_id = pkg_basename + ":" + pkg_sha
         archive_formats = ["bz2", "gz", "lzma", "tar", "tbz", "tgz", "tlz",
@@ -1089,11 +1203,17 @@ def cmd_install():
 
             # check if extract to subfolder
             if pkg_ext in archive_formats:
-                subfolder = "/" + pkg_appdir
+                # set installation path
+                if args.noversionrename:
+                    subfolder = "/" + pkg_appdir_no_ver
+                else:
+                    subfolder = "/" + pkg_appdir
             else:
-                subfolder = "/" + pkg_basename_upper
+                if args.noversionrename:
+                    subfolder = "/" + pkg_basename_upper_no_ver
+                else:
+                    subfolder = "/" + pkg_basename_upper
 
-            # set installation path
             if args.installpath:
                 if args.rename:
                     path_dst = args.installpath
@@ -1105,6 +1225,10 @@ def cmd_install():
                 path_dst = inst_path_backgrounds + \
                            pkg_nam.replace("wallpaper-", "").replace(
                                "background-", "") + "." + pkg_ext
+            elif "INSTALLPATH:" in pkg_scr:
+                error_crit("TODO")
+                path_dst_split = pkg_search.split("INSTALLPATH:")
+                path_dst = path_dst_split[1]
             elif pkg_ins == "ansible-coll":
                 path_dst = "/etc/ansible/collections/ansible_collections/" + \
                            pkg_namlow \
@@ -1128,7 +1252,7 @@ def cmd_install():
             elif pkg_ins == "data":
                 path_dst = "/var/opt/data" + subfolder
             elif pkg_ins == "vm":
-                path_dst = "/var/opt/vm_images" + subfolder
+                path_dst = "/var/opt/vm_templates" + subfolder
             elif pkg_ins == "web":
                 path_dst = "/var/opt/www_templates" + subfolder
             elif pkg_ins == "winapp":
@@ -1138,23 +1262,41 @@ def cmd_install():
             else:
                 path_dst = "/var/opt/unknown" + subfolder
 
-            # is an archive, extract
+            # extract archive
             if pkg_ext in archive_formats:
                 extract_app(file_pkg_src, path_dst, pkg_basename)
-            # is not an archive, copy
+                if "ARGS:" in pkg_scr:
+                    print("file_pkg_src: " + file_pkg_src)
+                    print("path_dst: " + path_dst)
+                    print("pkg_basename: " + pkg_basename)
+                    error_crit("Installing achive files with args is not"
+                               "implemented yet. Please contact the dev.")
             else:
-                if pkg_ins == "disk" or pkg_ins == "firefox-ext":
+                # link large data files instead of copying
+                if pkg_ins == "disk" or \
+                        pkg_ins == "firefox-ext" or \
+                        pkg_ins == "vm":
                     if io_link_file(file_pkg_src, path_dst):
                         print_status(pkg_basename + " linked to "
                                      + path_dst)
                     else:
                         print_status(pkg_basename + " already linked to "
                                      + path_dst)
+                # assuming silent installer args
+                elif "ARGS:" in pkg_scr:
+                    io_chmod(file_pkg_src)
+                    print_status(pkg_basename + " installing with silent args")
+                    # install directly from downloads folder
+                    installer_args = pkg_scr.replace('ARGS: ', '').replace(
+                        'ARGS:', '')
+                    shell_cmd(file_pkg_src + " " + installer_args)
+                # manual and unkown installation method, just copy
                 else:
+                    io_chmod(file_pkg_src)
                     if io_copy_file(file_pkg_src, path_dst):
-                        io_chmod(path_dst)
                         print_status(pkg_basename + " installed to "
                                      + path_dst)
+                        io_chmod(path_dst)
                     else:
                         print_status(pkg_basename + " already installed to "
                                      + path_dst)
@@ -1203,27 +1345,6 @@ def cmd_install():
     # notify user: if you do this, uninstall will not work.
     # First search PACKAGES_ROOT then PACKAGES_USER for existing packages
     # apped to the "installed packages" list
-
-
-def cache_only_latest_version(list_packages):
-    list_names = []
-    list_versions = []
-
-    # simple list
-    for i in list_packages:
-        name = i[0].lower()
-        list_names.append(name)
-
-    for j in list_packages:
-        pkg_nam = j[0]
-        pkg_ver = j[1]
-        pkg_namlow = pkg_nam.lower()
-
-        # todo:
-        # only install the latest verison
-        pkg_count = list_names.count(pkg_namlow)
-        if pkg_count > 1:
-            print("multiversion: " + pkg_namlow + ": " + str(pkg_count))
 
 
 def cmd_list():
@@ -1281,20 +1402,19 @@ def cmd_list():
 
 
 def cmd_mirror():
-    # todo:
-    cache_only_latest_version(cache_csv_to_list())
+    error_crit("Not yet implemented")
 
 
 def cmd_remove():
-    pass
+    error_crit("Not yet implemented")
 
 
 def cmd_search():
-    pass
+    error_crit("Not yet implemented")
 
 
 def cmd_show():
-    list_packages = cache_csv_to_list()
+    list_packages = cache_csv_to_list_latest_version()
 
     # show package details
     for j in list_packages:
