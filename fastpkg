@@ -769,7 +769,8 @@ def cache_csv_to_list():
                 pkg_search = current_pkg.lstrip('=').lower()
                 pkg_nam = str(list_rows[i][0]).lower()
                 pkg_ver = str(list_rows[i][1])
-                text_search = ": " + pkg_nam + " " + pkg_ver
+                pkg_ext = str(list_rows[i][2])
+                text_search = ": " + pkg_nam + "." + pkg_ext + " " + pkg_ver
                 # exact match
                 if pkg_search == pkg_nam:
                     printvvv("search: exact match" + text_search)
@@ -810,7 +811,7 @@ def cache_csv_to_list_latest_version():
     # find each individual program
     list_pkg_groups = []
     for m in list_packages:
-        pkg_uniq = m[0].lower()
+        pkg_uniq = m[0].lower() + "." + m[2].lower()
         if pkg_uniq not in list_pkg_groups:
             list_pkg_groups.append(pkg_uniq)
 
@@ -822,10 +823,11 @@ def cache_csv_to_list_latest_version():
         for j in list_packages:
             pkg_nam = j[0]
             pkg_ver = j[1]
-            pkg_namlow = pkg_nam.lower()
+            pkg_ext = j[2]
+            pkg_cluster = pkg_nam.lower() + "." + pkg_ext.lower()
 
-            # only iterate over one group at a time
-            if pkg_namlow == current_pkg_group:
+            # only iterate over one group (cluster of files) at a time
+            if pkg_cluster == current_pkg_group:
                 # find maximum length of each sub versions
                 # for ver_sub in pkg_ver:
                 ver_sub = pkg_ver
@@ -1463,11 +1465,12 @@ def cmd_show():
 
 
 def cmd_update():
+    list_repo_cache = []
+    throw_error = False
+
     # remove old cache and create new cache dir
     io_remove_dir(path_list_cache)
     io_make_dir(path_list_cache)
-
-    list_repo_cache = []
 
     # download each repo's individual package list file
     each_repo_uri = io_file_to_list(file_repo_list)
@@ -1491,6 +1494,7 @@ def cmd_update():
             else:
                 # remove broken cache file
                 io_remove_file(file_repo_des)
+                throw_error = True
 
         # from website
         elif uri.startswith("https://"):
@@ -1505,9 +1509,16 @@ def cmd_update():
                 else:
                     # remove broken cache file
                     io_remove_file(file_repo_des)
+                    throw_error = True
+            else:
+                throw_error = True
 
         else:
             print_status(uri, 'err', "is not a valid uri: " + uri)
+
+    # fail if there are some errors
+    if throw_error:
+        error_crit("Some repos failed to update")
 
     # create to local packages cache
     # sort by lower case file names
