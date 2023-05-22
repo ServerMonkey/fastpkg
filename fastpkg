@@ -69,8 +69,7 @@ if "CYGWIN" in platform.system():
 # PARSER INIT #################################################################
 
 # set main parser
-parser = argparse.ArgumentParser(description="Simple suckless package \
-                                 manager.")
+parser = argparse.ArgumentParser(description="A complementary package manager")
 
 # designate the target variable for the main parser,
 # which is the main applications file name
@@ -91,13 +90,13 @@ parser.add_argument(
 
 parser.add_argument(
     "-f", "--force",
-    help="Redownload package. Can fix broken downloads.",
+    help="Re-download package. This can fix broken downloads.",
     action='store_true'
 )
 
 parser.add_argument(
     "-p", "--package",
-    help="Name of a package or packages. Separate multible packages by a \
+    help="Name of a package or packages. Separate multiple packages by a \
     space and in quotation marks. \
     Specify a version with underscore: <PACKAGE>_<VERSION>",
     metavar='PACKAGE_NAME',
@@ -119,24 +118,24 @@ parser.add_argument(
 
 parser.add_argument(
     "-r", "--repo",
-    help="Specify a single repo to target.",
+    help="Specify a single repo to target. Only for use with 'enlist'",
     metavar='REPO_URL',
     type=str,
 )
 
 parser.add_argument(
     "-v", "--verbose",
-    help="Get extra information. -v is recommendet for users, \
+    help="Get extra information. -v is recommended for users, \
     -vv is basic debugging, \
     -vvv is for full debugging.",
     action='count'
 )
 
-parser_cleanup = subparsers.add_parser(
-    "cleanup",
-    help="Delete all files in the download folder that are not \
-    in the current package-cache."
-)
+# parser_cleanup = subparsers.add_parser(
+#     "cleanup",
+#     help="Delete all files in the download folder that are not \
+#     in the current package-cache."
+# )
 
 parser_download = subparsers.add_parser(
     "download",
@@ -144,27 +143,27 @@ parser_download = subparsers.add_parser(
     Uses parallel download."
 )
 
-parser_edit = subparsers.add_parser(
-    "edit",
-    help="Edit the repo list file " + file_repo_list + " ."
-)
+# parser_edit = subparsers.add_parser(
+#     "edit",
+#     help="Edit the repo list file " + file_repo_list + " ."
+# )
 
 parser_enlist = subparsers.add_parser(
     "enlist",
     help="Append a repo URL to the repo list file " + file_repo_list + " ."
 )
 
-parser_enlist.add_argument(
-    "--insecure",
-    help="Ignore GPG verification of the repos package list.",
-    action='store_true'
-)
+# parser_enlist.add_argument(
+#     "--insecure",
+#     help="Ignore GPG verification of the repos package list.",
+#     action='store_true'
+# )
 
-parser_erase = subparsers.add_parser(
-    "erase",
-    help="Delete the download-cache for a package. \
-    Does not remove the installed package."
-)
+# parser_erase = subparsers.add_parser(
+#     "erase",
+#     help="Delete the download-cache for a package. \
+#     Does not remove the installed package."
+# )
 
 parser_exportcache = subparsers.add_parser(
     "exportcache",
@@ -217,39 +216,39 @@ parser_list = subparsers.add_parser(
     downloaded and/ore installed."
 )
 
-parser_mirror = subparsers.add_parser(
-    "mirror",
-    help="Create a copy of every repos package file, \
-    but replace every packages download URL with a custom URL. \
-    Useful to create an offline file-mirror to be used on an internal network."
-)
+# parser_mirror = subparsers.add_parser(
+#     "mirror",
+#     help="Create a copy of every repo's package file, \
+#     but replace every package's download URL with a custom URL. \
+#     Useful to create an offline file-mirror to be used on an internal network."
+# )
+#
+# parser_mirror.add_argument(
+#     "-u, --url",
+#     help="Enter the URL adress where your downloaded packages \
+#     will be found. Combine with --makerepo to create a fully working mirror.",
+#     metavar='URL',
+#     type=str
+# )
+#
+# parser_mirror.add_argument(
+#     "-m, --makerepo",
+#     help="Automatically create symlinks for all downloaded packages, to be \
+#     used on a webserver. Combine with --url to create a fully working mirror.",
+#     metavar='PATH_WWW',
+#     type=str
+# )
 
-parser_mirror.add_argument(
-    "-u, --url",
-    help="Enter the URL adress where your downloaded packages \
-    will be found. Combine with --makerepo to create a fully working mirror.",
-    metavar='URL',
-    type=str
-)
+# parser_remove = subparsers.add_parser(
+#     "remove",
+#     help="Remove (uninstall) a package from the system. \
+#     Does not delete the download-cache."
+# )
 
-parser_mirror.add_argument(
-    "-m, --makerepo",
-    help="Automatically create symlinks for all downloaded packages, to be \
-    used on a webserver. Combine with --url to create a fully working mirror.",
-    metavar='PATH_WWW',
-    type=str
-)
-
-parser_remove = subparsers.add_parser(
-    "remove",
-    help="Remove (uninstall) a package from the system. \
-    Does not delete the download-cache."
-)
-
-parser_search = subparsers.add_parser(
-    "search",
-    help="Search for a package in package names and descriptions."
-)
+# parser_search = subparsers.add_parser(
+#     "search",
+#     help="Search for a package in package names and descriptions."
+# )
 
 parser_show = subparsers.add_parser(
     "show",
@@ -395,7 +394,9 @@ def io_chmod(des_file):
         os.chmod(des_file, 0o755)
         printvvv("take_ownership: 755 " + des_file)
     # only change permissions in allowed path
-    elif des_file.startswith(path_base) or des_file == file_repo_list:
+    elif des_file.startswith(path_base) or \
+            des_file == file_repo_list or \
+            des_file.startswith('/opt/'):
         os.chmod(des_file, 0o755)
         printvvv("take_ownership: 755 " + des_file)
     else:
