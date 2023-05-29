@@ -388,21 +388,27 @@ def io_change_dir(target_dir):
         error_crit("change_dir: path does not exist: " + target_dir)
 
 
-def io_chmod(des_file):
+def io_set_file_executable(des_file):
     # must be executable or won't be able to install applications on Windows
     if "CYGWIN" in platform.system():
         os.chmod(des_file, 0o755)
-        printvvv("take_ownership: 755 " + des_file)
+        printvvv("set_permissions: 755 " + des_file)
     # only change permissions in allowed path
     elif des_file.startswith(path_base) or \
             des_file == file_repo_list or \
             des_file.startswith('/opt/'):
         os.chmod(des_file, 0o755)
-        printvvv("take_ownership: 755 " + des_file)
+        printvvv("set_permissions: 755 " + des_file)
     else:
-        error_crit("take_ownership: forbidden to chmod outside of "
+        error_crit("set_permissions: forbidden to chmod outside of "
                    + path_base + " and " + file_repo_list + " file: "
                    + des_file)
+
+
+def io_set_windows_folder_permissions(des_folder):
+    if "CYGWIN" in platform.system():
+        shell_cmd("chmod -R 750 " + des_folder)
+        printvvv("set_permissions_recursive: 750 " + des_folder)
 
 
 def io_remove_file(des_file):
@@ -764,7 +770,7 @@ def cache_csv_to_list():
         list_rows_filtered = []
         # iterate over all repos
         for i in range(len(list_rows)):
-            # iterate over comma seperated packages
+            # iterate over space seperated packages
             for current_pkg in args.package.split(' '):
                 # ignore case on input package string
                 pkg_search = current_pkg.lstrip('=').lower()
@@ -792,8 +798,26 @@ def cache_csv_to_list():
                         printvvv("search: version match" + text_search)
                         list_rows_filtered.append(list_rows[i])
 
+        # create list of matching packages
+        list_rows_matching = []
+        for k in list_rows_filtered:
+            list_rows_matching.append(k[0].lower())
+        # verify that all searched packages are also matching packages
+        for current_pkg_verify in args.package.split(' '):
+            pgk_verified = False
+            pkg_check = current_pkg_verify.lstrip('=').split('_')[
+                0].lower().replace('*', '')
+            printvvv("verify: " + pkg_check)
+            for matching_pkg in list_rows_matching:
+                if matching_pkg.startswith(pkg_check):
+                    pgk_verified = True
+                    break
+            if pgk_verified is False:
+                print_err("Package '" + pkg_check + "' not found")
+                exit(1)
+
         if not list_rows_filtered:
-            print_err("Package '" + args.package + "' not found")
+            print_err("No matching package found")
             exit(1)
 
         return list_rows_filtered
@@ -937,7 +961,8 @@ def pre_extract(file_in, path_out, file_name_out):
     io_change_dir(path_out)
     shell_cmd("dtrx -q -n --one rename " + file_in)
     if os.path.isfile(file_out):
-        io_chmod(file_out)
+        os.chmod(file_out, 0o644)
+        printvvv("set_permissions: 644 " + file_out)
         print_status(file_name_out + " extracted")
     else:
         error_crit("extract: can not find file: " + file_out)
@@ -960,9 +985,7 @@ def extract_app(file_in, path_out, file_name_out):
     io_make_dir(path_out)
     io_change_dir(path_out)
     shell_cmd("dtrx -q -n --one here " + file_in)
-    # set default windows permissions
-    if "CYGWIN" in platform.system():
-        shell_cmd("chmod -R 750 " + path_out)
+    io_set_windows_folder_permissions(path_out)
     # remove unnecessary subfolder
     count_dirs = 0
     count_files = 0
@@ -1026,8 +1049,8 @@ def cmd_download():
         # already downloaded
         elif os.path.exists(file_pkg_src):
             print_status(pkg_basename + " already downloaded")
-            # make sure permissions are correct
-            io_chmod(file_pkg_src)
+            # reapply executable permissions
+            io_set_file_executable(file_pkg_src)
             # verify hash
             if args.skip:
                 print_status(pkg_basename + " skip hash verification")
@@ -1063,6 +1086,8 @@ def cmd_download():
                         and os.path.getsize(file_pkg_src) == 0:
                     print_status(pkg_basename, "err", text_zerobytes)
                 else:
+                    # set permissions
+                    io_set_file_executable(file_pkg_src)
                     # all good
                     if args.skip:
                         print_status(pkg_basename + " skip hash verification")
@@ -1191,6 +1216,10 @@ def cmd_install():
                              "missing dot in " + pkg_basename
                              + ", example: 'exe.zip'")
 
+        # PERMISSONS
+        # make sure file is executable
+        io_set_file_executable(file_pkg_src)
+
         # DATA
         if pkg_ins in generic_file_formats:
             # scan for installers
@@ -1287,7 +1316,6 @@ def cmd_install():
                                      + path_dst)
                 # assuming silent installer args
                 elif "ARGS:" in pkg_scr:
-                    io_chmod(file_pkg_src)
                     print_status(pkg_basename + " installing with silent args")
                     # install directly from downloads folder
                     installer_args = pkg_scr.replace('ARGS: ', '').replace(
@@ -1295,11 +1323,10 @@ def cmd_install():
                     shell_cmd(file_pkg_src + " " + installer_args)
                 # manual and unkown installation method, just copy
                 else:
-                    io_chmod(file_pkg_src)
                     if io_copy_file(file_pkg_src, path_dst):
                         print_status(pkg_basename + " installed to "
                                      + path_dst)
-                        io_chmod(path_dst)
+                        io_set_windows_folder_permissions(path_dst)
                     else:
                         print_status(pkg_basename + " already installed to "
                                      + path_dst)
@@ -1309,7 +1336,12 @@ def cmd_install():
             io_add_line_to_file(file_installed_pkgs, installed_id_with_path)
 
         # DEBIAN PACKAGE
-        elif pkg_ins == "dpkg" and pkg_ext == "deb":
+        elif pkg_ins == "dpkg":
+            if pkg_ext != "deb":
+                print_status(pkg_basename, 'err',
+                             "aborting, not a .deb file, wrong extension ."
+                             + pkg_ext + " , fix the repo")
+                exit(1)
             cmd_verify = "dpkg -s " + pkg_namlow + " 2>&1"
             # pre verify
             deb_status_before = shell_cmd(cmd_verify)
@@ -1322,10 +1354,12 @@ def cmd_install():
                 if "install ok installed" in deb_status_after:
                     print_status(pkg_basename + " installed")
                 elif "is not installed" in deb_status_after:
-                    print_status(pkg_basename, 'err', "failed to install")
+                    print_status(pkg_basename, 'err', "apt failed to install")
+                    exit(1)
                 else:
                     print_status(pkg_basename, 'err',
                                  "installation: " + deb_status_after)
+                    exit(1)
 
         # CUSTOM INSTALLER
         elif pkg_ins == "installer":
