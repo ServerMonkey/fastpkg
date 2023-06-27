@@ -99,7 +99,7 @@ For action `install`
 
 ## COMMON USAGE EXAMPLES
 
-Add a repository
+Add a repository (this example adds my personal repo)
 
     $ fastpkg -r https://muspekaren.se/fpkg enlist
 
@@ -285,10 +285,27 @@ Supported installer types:
 installation directory.  
 **WIN_ROOT is the root of the Windows installation, e.g. C:\
 
+## OUTDATED LINKS
+
+By providing a collection of links from the internet, the chance that one of
+those links will be outdated very quickly is high. You are welcome to use my
+repo https://muspekaren.se/fpkg in your projects, but There is a high change
+that links in my repo will stop working. Please contact me if this happens and
+I do my best to update them. A simple solution is to just copy my repo and
+replace the broken links with the URL of your own internal file-host. In that
+way you don't need to rewrite scrips that use the same package name from my
+repo on muspekaren.se/fpkg.
+
+Also see my notes on Miscrosoft ISO
+files: [Windows ISOs](https://github.com/ServerMonkey/servermonkeys-devtools/windows-isos.md)
+
+Another good reason to host your own repo is speed. Several packages in my repo
+are provided by archive.org which have very slow download speeds.
+
 ## COPYRIGHT
 
 See license file
 
 ## SEE ALSO
 
-axel(1), dtrx(1)
+axel(1), dtrx(1), 
