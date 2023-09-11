@@ -396,6 +396,7 @@ def io_set_file_executable(des_file):
     # only change permissions in allowed path
     elif des_file.startswith(path_base) or \
             des_file == file_repo_list or \
+            des_file.startswith(inst_path_backgrounds) or \
             des_file.startswith('/opt/'):
         os.chmod(des_file, 0o755)
         printvvv("set_permissions: 755 " + des_file)
