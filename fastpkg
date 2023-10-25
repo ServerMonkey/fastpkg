@@ -58,6 +58,10 @@ file_repo_list = path_cfg + "fastpkg.list"
 file_cfg = path_cfg + "config.cfg"
 file_pkgs = "packages.csv"
 file_pkgs_gpg = file_pkgs + ".gpg"
+user_agent_a = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+user_agent_b = "AppleWebKit/537.36 (KHTML, like Gecko)"
+user_agent_c = "Chrome/103.0.0.0 Safari/537.36"
+user_agent = user_agent_a + " " + user_agent_b + " " + user_agent_c
 
 # default installation folders
 inst_path_backgrounds = path_root + "usr/share/backgrounds/"
@@ -85,6 +89,12 @@ parser.add_argument(
 parser.add_argument(
     "-b", "--blackwhite",
     help="Don't colorize output",
+    action='store_true'
+)
+
+parser.add_argument(
+    "-c", "--continuedl",
+    help="Continue an aborted jigdo download",
     action='store_true'
 )
 
@@ -299,8 +309,18 @@ col_red = "\x1b[7;31;40m"
 col_green = "\x1b[7;32;40m"
 col_cyan = "\x1b[7;36;40m"
 
-# text strings
-text_err_abort = "ERROR, aborting:"
+# load settings from config file, ignore errors
+offline_mode = False
+if os.path.isfile(file_cfg):
+    try:
+        cfg_file = open(file_cfg, "r")
+        for cfg_file_line in cfg_file:
+            if cfg_file_line.upper().startswith('OFFLINE'):
+                offline_mode = True
+        cfg_file.close()
+    except Exception as cfg_file_error:
+        print_err("ERROR: can not open config file" + str(cfg_file_error))
+        exit(1)
 
 
 # FUNCTIONS ###################################################################
@@ -590,9 +610,19 @@ def hash_file(file_path, correct_hash):
 
     # need to read to a smaller memory buffer, or with fail on large files
     stream_buffer = 65536
-    file_hash_bytes = hashlib.sha256()
+
+    # select sha265 or md5 hash algorithm
+    hash_size = len(correct_hash.encode("utf8"))
+    if hash_size == 32:
+        file_hash_bytes = hashlib.md5()
+    elif hash_size == 64:
+        file_hash_bytes = hashlib.sha256()
+    else:
+        file_hash_bytes = ""
+        error_crit("hash_file: unknown hash, hash_size: " + str(hash_size))
 
     try:
+        printvvv("hash_file: hashing " + file_path)
         with open(file_path, 'rb') as f:
             while True:
                 file_stream = f.read(stream_buffer)
@@ -604,8 +634,6 @@ def hash_file(file_path, correct_hash):
                 file_hash = file_hash_bytes.hexdigest()
             except Exception as error:
                 error_crit("hash_file: hexdigest() failed " + str(error))
-
-        printvvv("hash_file: read hash OK " + file_path)
     except Exception as error:
         printvvv("hash_file: read hash failed " + str(error))
 
@@ -613,8 +641,7 @@ def hash_file(file_path, correct_hash):
         print_status(file_name + " hash verified")
         return True
     else:
-        print_status(file_name, "err", "hash does not match, removing")
-        # io_remove_file(file_path)
+        print_status(file_name, "err", "hash does not match, try -f")
         printvv("hash details of " + file_path)
         printv("file hash is : " + str(file_hash))
         printv("but should be: " + correct_hash)
@@ -914,13 +941,23 @@ def packages_list_to_data(list_packages):
 
 
 def check_remote_host(url):
+    if offline_mode:
+        printvvv("check_remote_host: skip, offline_mode")
+        return True
+
     if "CYGWIN" in platform.system():
         error_crit("Cygwin is not supported for online download")
 
-    header_size = {"Range": "bytes=0-100"}
+    headers = {
+        'User-Agent': user_agent,
+        'Accept-Encoding': 'gzip, deflate', 'Accept': '*/*',
+        'Connection': 'close',
+        'Range': 'bytes=0-100'
+    }
+
     try:
-        # only try to download a small part
-        remote_url = requests.get(url, headers=header_size, timeout=10)
+        # only try to download a small part, ignore TLS errors
+        remote_url = requests.get(url, headers=headers, timeout=10)
         printvvv("check_remote_host: final url: " + remote_url.url)
         status = remote_url.status_code
         status_nr = str(status)
@@ -934,17 +971,21 @@ def check_remote_host(url):
             printvvv("check_remote_host: OK " + status_nr + " " + url)
             return True
         elif status == 403:
-            print_status(url, 'err', status_text + ", probably DoS protected")
+            print_status(url, 'err',
+                         status_text + ", wrong permissions or DoS protected")
             return False
         else:
             print_status(url, 'err', "unhandled status code " +
                          status_nr + " " + status_text)
             return False
+    except requests.exceptions.SSLError:
+        print_status(url, 'err', "SSL error")
+        return False
     except requests.exceptions.Timeout:
         print_status(url, 'err', "host timed-out")
         return False
     except requests.exceptions.ConnectionError:
-        print_status(url, 'err', "host/network is unreachable")
+        print_status(url, 'err', "host/network is unreachable: ")
         return False
     except Exception as error:
         print_status(url, 'err', str(error))
@@ -1019,83 +1060,102 @@ def extract_app(file_in, path_out, file_name_out):
     print_status(file_name_out + " is installed to " + path_out)
 
 
-def cmd_download():
+def cmd_download_all_packages():
     list_packages = cache_csv_to_list_latest_version()
     throw_error = False
 
     # download all packages in list
-    for j in list_packages:
-        # set variables
-        pkg_nam = j[0]
-        pkg_ver = j[1]
-        pkg_ext = j[2]
-        pkg_sha = j[6]
-        pkg_url = j[7]
-        pkg_namlow = pkg_nam.lower()
-        pkg_basename = pkg_namlow + "_" + pkg_ver + "." + pkg_ext
-        file_pkg_src = path_downloads + pkg_basename
-        file_log = path_downloads_log + pkg_basename + ".log"
-        file_err = path_downloads_log + pkg_basename + ".err"
+    for i in list_packages:
+        if cmd_download(i) is False:
+            throw_error = True
 
-        # force redownload
-        if args.force:
+    if throw_error is True:
+        error_crit("Some packages failed to verify")
+
+
+def cmd_download(list_pkg):
+    # set variables
+    pkg_nam = list_pkg[0]
+    pkg_ver = list_pkg[1]
+    pkg_ext = list_pkg[2]
+    pkg_sha = list_pkg[6]
+    pkg_url = list_pkg[7]
+    pkg_namlow = pkg_nam.lower()
+    pkg_basename = pkg_namlow + "_" + pkg_ver + "." + pkg_ext
+    file_pkg_src = path_downloads + pkg_basename
+    file_log = path_downloads_log + pkg_basename + ".log"
+    file_err = path_downloads_log + pkg_basename + ".err"
+
+    # force redownload
+    if args.force:
+        if offline_mode:
+            print("offline mode, not force removing download")
+        else:
             io_remove_file(file_pkg_src)
 
-        text_zerobytes = "File is empty, check URL path in packages CSV"
+    text_zerobytes = "File is empty, check URL path in packages CSV"
 
-        # broken download, zero bytes
-        if os.path.exists(file_pkg_src) \
-                and os.path.getsize(file_pkg_src) == 0:
-            print_status(pkg_basename, "err", text_zerobytes)
-        # already downloaded
-        elif os.path.exists(file_pkg_src):
-            print_status(pkg_basename + " already downloaded")
-            # reapply executable permissions
-            io_set_file_executable(file_pkg_src)
-            # verify hash
-            if args.skip:
-                print_status(pkg_basename + " skip hash verification")
-            elif not hash_file(file_pkg_src, pkg_sha):
-                throw_error = True
-        # download
-        elif check_remote_host(pkg_url):
-            # check that axel is installed
-            if not shell_cmd("command -v axel"):
+    # broken download, zero bytes
+    if os.path.exists(file_pkg_src) \
+            and os.path.getsize(file_pkg_src) == 0:
+        print_status(pkg_basename, "err", text_zerobytes)
+    # already downloaded
+    elif os.path.exists(file_pkg_src):
+        print_status(pkg_basename + " already downloaded")
+        # reapply executable permissions
+        io_set_file_executable(file_pkg_src)
+        # verify hash
+        if args.skip:
+            print_status(pkg_basename + " skip hash verification")
+        elif not hash_file(file_pkg_src, pkg_sha):
+            return False
+    # download
+    else:
+        if not check_remote_host(pkg_url):
+            print_status(pkg_basename, "err", "can not connect to host")
+            return False
+        else:
+            if offline_mode:
+                print_status(pkg_basename + " skip download, offline mode")
+            elif not shell_cmd("command -v axel"):
                 error_crit("axel is not installed")
+            else:
+                io_remove_file(file_log)
+                io_remove_file(file_err)
+                print_status(pkg_basename + " downloading...", "dl")
+                io_change_dir(path_tmp)
+                dl_cmd = 'axel -c -U "' + user_agent + '" -n 1 ' \
+                         + '"' + pkg_url \
+                         + '" -o "' + file_pkg_src \
+                         + '" 1>"' + file_log \
+                         + '" 2>"' + file_err + '"'
+                shell_cmd(dl_cmd)
 
-            io_remove_file(file_log)
-            io_remove_file(file_err)
-
-            user_agent = "'Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
-                         "AppleWebKit/537.36 (KHTML, like Gecko)" \
-                         "Chrome/103.0.0.0 Safari/537.36'"
-
-            print_status(pkg_basename + " downloading...", "dl")
-            io_change_dir(path_tmp)
-            dl_cmd = 'axel -c -U ' + user_agent + ' -n 1 ' \
-                     + '"' + pkg_url \
-                     + '" -o "' + file_pkg_src \
-                     + '" 1>"' + file_log \
-                     + '" 2>"' + file_err + '"'
-            shell_cmd(dl_cmd)
+            # fix zero bytes size log error
+            if os.path.isfile(file_err) and os.path.getsize(file_err) == 0:
+                io_remove_file(file_err)
 
             # if no error log
-            if os.path.getsize(file_err) == 0:
-                io_remove_file(file_err)
-                # verify download
+            if not os.path.isfile(file_err):
+                # verify zero bytes size
                 if os.path.isfile(file_pkg_src) \
                         and os.path.getsize(file_pkg_src) == 0:
                     print_status(pkg_basename, "err", text_zerobytes)
-                else:
+                # verify downloaded file
+                elif os.path.isfile(file_pkg_src):
                     # set permissions
                     io_set_file_executable(file_pkg_src)
                     # all good
                     if args.skip:
-                        print_status(pkg_basename + " skip hash verification")
+                        print_status(pkg_basename +
+                                     " skip hash verification")
                     elif not hash_file(file_pkg_src, pkg_sha):
-                        throw_error = True
+                        return False
                     # todo: to make rescanning faster,
                     # use another hashing algorythm, like md5
+                else:
+                    print_status(pkg_basename, "err",
+                                 "download not found: " + file_pkg_src)
             # if error log
             else:
                 try:
@@ -1105,8 +1165,132 @@ def cmd_download():
                     error_crit("Error: " + str(error))
                 print_status(pkg_basename, "err", error_msg)
 
-    if throw_error:
-        error_crit("Some packages failed to verify")
+    # download jigdo files
+    if pkg_ext == '.jigdo':
+        printvv(pkg_basename + " jigdo file without additional extension,"
+                + "not downloading")
+    elif pkg_ext.endswith('.jigdo'):
+        # variables
+        pkg_ji_basename = pkg_basename.rsplit('.jigdo', 1)[0]
+
+        path_ji_tmp = path_downloads + pkg_basename + "_tmp/"
+        file_ji_log = path_downloads_log + pkg_basename + ".jlog"
+        file_pkg_ji_name_tmp = \
+            pkg_url.rsplit('/', 1)[1].rsplit('.jigdo', 1)[0]
+        pkg_ji_ext = '.' + pkg_ext.rsplit('.jigdo', 1)[0]
+        file_pkg_ji_src_tmp = path_ji_tmp + file_pkg_ji_name_tmp + pkg_ji_ext
+        file_ji_info = path_ji_tmp + file_pkg_ji_name_tmp + '.jigdo.unpacked'
+        file_pkg_ji_src = path_downloads + pkg_ji_basename
+        file_pkg_ji_md5 = file_pkg_ji_src + ".md5"
+
+        # continue download
+        if args.continuedl:
+            printvv("continuing jigdo download")
+        # force jigdo redownload
+        elif args.force:
+            if offline_mode:
+                print("offline mode, not force removing download")
+            else:
+                io_remove_dir(path_ji_tmp)
+                io_remove_file(file_pkg_ji_md5)
+                io_remove_file(file_pkg_ji_src)
+        # abort if temp path still exists
+        elif os.path.exists(path_ji_tmp):
+            print_status(pkg_basename, "err", "jigdo temp path exists, "
+                         + "is another download running? "
+                         + "Else try -c to continue, or -f to erase and retry")
+            return False
+
+        # already downloaded
+        if os.path.exists(file_pkg_ji_src):
+            # verify zero bytes size
+            if os.path.getsize(file_pkg_ji_src) == 0:
+                print_status(pkg_ji_basename, "err", "File is empty")
+                return False
+            # abort if md5 file is missing
+            elif not os.path.exists(file_pkg_ji_md5):
+                print_status(pkg_basename, "err", "jigdo download file "
+                             + "exists, but not the md5 file")
+                return False
+            # verify hash
+            else:
+                pkg_ji_md5 = io_file_to_list(file_pkg_ji_md5)[0]
+                if args.skip:
+                    print_status(pkg_ji_basename + " skip hash verification")
+                elif hash_file(file_pkg_ji_src, pkg_ji_md5):
+                    io_set_file_executable(file_pkg_ji_src)
+                    io_remove_dir(path_ji_tmp)
+                else:
+                    printvvv("jigdo hash verification failed")
+                    return False
+
+        # download jigdo
+        else:
+            if not shell_cmd("command -v jigdo-lite"):
+                error_crit("jigdo-file is not installed")
+            print_status(pkg_basename + " downloading with jigdo...", "dl")
+            io_remove_file(file_ji_log)
+            io_make_dir(path_ji_tmp)
+            io_change_dir(path_ji_tmp)
+            dl_cmd_ji = 'jigdo-lite --noask "' + pkg_url + '"' \
+                        + ' 1>"' + file_ji_log + '" 2>&1'
+            shell_cmd(dl_cmd_ji)
+
+            # sometimes the .unpacked file is not created or removed by jigdo
+            if not os.path.isfile(file_ji_info):
+                shell_cmd("gzip -d " + file_pkg_src + " -c > " + file_ji_info)
+            # verift
+            if not os.path.isfile(file_ji_info):
+                print_status(pkg_basename, "err",
+                             "failed to find: " + file_ji_info)
+                return False
+
+            # save md5 data
+            io_remove_file(file_pkg_ji_md5)
+            list_ji_info = io_file_to_list(file_ji_info)
+            hash_string = "# Image Hex MD5Sum "
+            md5_sum = ""
+            for i in list_ji_info:
+                if i.startswith(hash_string):
+                    md5_sum = str(i).rsplit(hash_string, 1)[1]
+                    if len(md5_sum.encode("utf8")) == 32:
+                        printv("file hash should be: " + md5_sum)
+                        io_add_line_to_file(file_pkg_ji_md5, md5_sum)
+                        break
+                    else:
+                        print_status(pkg_basename, "err",
+                                     "not an md5 hash: " + md5_sum)
+                        return False
+            del list_ji_info
+
+            if not md5_sum:
+                print_status(pkg_basename, "err",
+                             "no md5 hash found in: " + file_ji_info)
+                return False
+
+            list_ji_log = io_file_to_list(file_ji_log)
+            ji_verified = False
+            for j in list_ji_log:
+                if 'image is good' in j:
+                    print_status(pkg_basename, "jigdo download verified")
+                    ji_verified = True
+                    break
+                elif 'already exists' in j and \
+                        hash_file(file_pkg_ji_src_tmp, md5_sum):
+                    ji_verified = True
+                    break
+            del list_ji_log
+
+            # show error log
+            if ji_verified:
+                # move download file one level up and cleanup
+                io_move_file(file_pkg_ji_src_tmp, file_pkg_ji_src)
+                io_set_file_executable(file_pkg_ji_src)
+                io_remove_dir(path_ji_tmp)
+            else:
+                print_status(pkg_basename, "err",
+                             "jigdo failed, check the log: " + file_ji_log)
+                return False
 
 
 def cmd_edit():
@@ -1168,6 +1352,9 @@ def cmd_install():
         pkg_nam = j[0]
         pkg_ver = j[1]
         pkg_ext = j[2]
+        if pkg_ext.endswith('.jigdo'):
+            printvvv("cmd_install: removing jigdo extension")
+            pkg_ext = pkg_ext.rsplit('.jigdo', 1)[0]
         pkg_ins = j[3]
         pkg_scr = j[4]
         pkg_sha = j[6]
@@ -1182,8 +1369,9 @@ def cmd_install():
         archive_formats = ["bz2", "gz", "lzma", "tar", "tbz", "tgz", "tlz",
                            "xz", "zip"]
         generic_file_formats = ["ansible-coll", "ansible-role", "app", "data",
-                                "disk", "firefox-ext", "java", "vm", "web",
-                                "winapp", "windata"]
+                                "disk", "firefox-ext", "java", "libvirt", "vm",
+                                "web", "winapp", "windata"]
+        link_only_formats = ["disk", "firefox-ext", "libvirt", "vm"]
 
         # already installed
         if installed_id in file_installed_pkgs:
@@ -1227,7 +1415,8 @@ def cmd_install():
             for m in list_packages:
                 installer_pkg_nam = m[0].lower()
                 installer_pkg_ver = m[1]
-                installer_pkg_ext = m[2]
+                # todo, remove?
+                # installer_pkg_ext = m[2]
                 installer_pkg_ins = m[3]
                 if installer_pkg_ins == "installer":
                     if pkg_namlow + pkg_ver == installer_pkg_nam + \
@@ -1247,6 +1436,7 @@ def cmd_install():
                 else:
                     subfolder = "/" + pkg_basename_upper
 
+            path_dst = ""
             if args.installpath:
                 if args.rename:
                     path_dst = args.installpath
@@ -1260,8 +1450,8 @@ def cmd_install():
                                "background-", "") + "." + pkg_ext
             elif "INSTALLPATH:" in pkg_scr:
                 error_crit("TODO")
-                path_dst_split = pkg_search.split("INSTALLPATH:")
-                path_dst = path_dst_split[1]
+                # path_dst_split = pkg_search.split("INSTALLPATH:")
+                # path_dst = path_dst_split[1]
             elif pkg_ins == "ansible-coll":
                 path_dst = "/etc/ansible/collections/ansible_collections/" + \
                            pkg_namlow \
@@ -1276,14 +1466,16 @@ def cmd_install():
                            + "/"
             elif pkg_ins == "app":
                 path_dst = "/opt" + subfolder
+            elif pkg_ins == "data":
+                path_dst = "/var/opt/data" + subfolder
             elif pkg_ins == "disk":
                 path_dst = "/var/opt/disk_images" + subfolder
             elif pkg_ins == "firefox-ext":
                 path_dst = "/var/opt/firefox_addons" + subfolder
             elif pkg_ins == "java":
                 path_dst = "/opt" + subfolder
-            elif pkg_ins == "data":
-                path_dst = "/var/opt/data" + subfolder
+            elif pkg_ins == "libvirt":
+                path_dst = "/var/lib/libvirt/templates" + subfolder
             elif pkg_ins == "vm":
                 path_dst = "/var/opt/vm_templates" + subfolder
             elif pkg_ins == "web":
@@ -1305,10 +1497,8 @@ def cmd_install():
                     error_crit("Installing achive files with args is not"
                                "implemented yet. Please contact the dev.")
             else:
-                # link large data files instead of copying
-                if pkg_ins == "disk" or \
-                        pkg_ins == "firefox-ext" or \
-                        pkg_ins == "vm":
+                # link large files instead of copying
+                if pkg_ins in link_only_formats:
                     if io_link_file(file_pkg_src, path_dst):
                         print_status(pkg_basename + " linked to "
                                      + path_dst)
@@ -1388,7 +1578,6 @@ def cmd_install():
 def cmd_list():
     list_packages = cache_csv_to_list()
     list_names = []
-    list_installed = []
     list_installed = io_file_to_list(file_installed_pkgs)
 
     # simple list
@@ -1504,6 +1693,10 @@ def cmd_update():
     list_repo_cache = []
     throw_error = False
 
+    if offline_mode:
+        print("offline mode, not updating")
+        exit(0)
+
     # remove old cache and create new cache dir
     io_remove_dir(path_list_cache)
     io_make_dir(path_list_cache)
@@ -1585,7 +1778,7 @@ def program_selector():
     case = args.command
     if case == "download":
         cmd_init()
-        cmd_download()
+        cmd_download_all_packages()
     elif case == "edit":
         cmd_init()
         cmd_edit()
@@ -1601,7 +1794,7 @@ def program_selector():
         cmd_init()
     elif case == "install":
         cmd_init()
-        cmd_download()
+        cmd_download_all_packages()
         cmd_install()
     elif case == "list":
         cmd_list()

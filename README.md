@@ -1,4 +1,4 @@
-fastpkg(1) -- A complementary package manager
+fastpkg(1) -- A packageless package manager
 =============================================
 
 ## SYNOPSIS
@@ -9,15 +9,17 @@ fastpkg(1) -- A complementary package manager
 
 ## DESCRIPTION
 
-A complementary package manager, turn any URL-file into a Linux like package.
+A complementary packageless package manager, turn any URL-file into a Linux
+like package.
 
 Managing software and files from third party sources can be a pain. This is
-especially true for Windows users. Fastpkg is a complementary package manager
-that can be used to manage software and files from third party sources.
+especially true for Windows users. Fastpkg is a complementary packageless
+package manager that can be used to manage software and files from third party
+sources.
 
-It differs from a traditional package manager in that packages don't come in a
-specific packaged format like .deb, .nupkg or .exe. that are specific to the
-package manager. Instead, packages are downloaded directly from the source and
+It differs from a traditional package managers in that packages don't come in a
+specific packaged format like .deb, .nupkg or .exe, that are specific to the
+package manager. Instead, packages are downloaded directly from a network and
 then installed. Unlike traditional package manager, in fastpkg - how packages
 are installed is defined in the repos packages.csv file, not in the package
 itself. This means that any package can be used on any system that has fastpkg
@@ -27,29 +29,34 @@ templates, Windows exes, Windows exes that come as zip files or .deb files that
 are hosted on GitHub. It can even be used as a wrapper for other package
 managers like APT.
 
-This gives the additional bonus of not having to repack software and host large
-amounts of packages on your own. This also enables distribution of software,
-that is not open source or that is otherwise not allowed to be repackaged.
-Fastpkg basically enables you to distribute any URL-file as a package without
-permission and without infringing on trademarks.
+This gives the additional bonus of not having to repackage software and host
+large amounts of packages on your own. This also enables distribution of
+software, that is not open source or that is otherwise not allowed to be
+repackaged. Fastpkg basically enables you to distribute any URL-file as a
+package without permission and without infringing on trademarks.
 
-Target system requirements:
+Target requirements:
 
 * POSIX compatible OS (e.g. Linux or Cygwin)
 * Python 2.7 or 3
+
+Optional requirements:
+
 * axel (available via shell)
 * dtrx (available via shell)
+* jigdo-lite (part of jigdo-file) (available via shell)
 
 dtrx can also be installed via fastpkg itself. In the official repo, it is
 available as 'fastpkg-dtrx'.
 
-Tested on: Debian 10, 11, Windows XP with Cygwin
+Tested on: Debian 10, 11, 12, Windows XP with Cygwin
 
 ## OPTIONS
 
 * `-h`, `--help` : show this help message and exit
 * `-a`, `--all` : Use instead of '-p'. Selects all packages in the repo(s).
 * `-b`, `--blackwhite` : Don't colorize output
+* `-c`, `--continuedl` : Continue an aborted jigdo download
 * `-f`, `--force` : Re-download package. This can fix broken downloads.
 * `-p`, `--package` `<PACKAGE_NAME>[_<VERSION>]` : Name of a package or
   packages. Separate multiple packages by a space and in quotation marks.
@@ -209,8 +216,13 @@ File-extension of the file to download. E.g. 'zip', 'exe',
 'cfg', 'jpg' and so on. It is not allowed to use an empty string. If you have a
 package that does not have an extension, use for example 'data' or 'run' as
 extension. This will rename the downloaded file to this extension. This string
-is also uses to tell the installer how to behave and detect archive files. For
-example, if you have a .zip file, the installer will extract the .zip file.
+is also uses to tell the installer how to behave and detect archive or jigdo
+files.
+
+If the extension is '.jigdo' fastpkg will use jigdo-lite to download the
+image. Usually you want to use the extension '.iso.jigdo' in your repo.
+Make sure your URL points to the .jigdo file and not the .iso or .template
+file.
 
 #### INSTALLER
 
@@ -272,17 +284,18 @@ Supported installer types:
 | ansible-coll  | /etc/ansible/collections/ansible_collections | Ansible Galaxy collection               |
 | ansible-role  | /etc/ansible/roles                           | Ansible role                            |
 | app           | /opt                                         | Generic Posix compatible application    |
+| data          | /var/opt/data                                | Generic none executable files           |
 | disk          | /var/opt/disk_images                         | *Disk images, like .iso                 |
 | firefox-ext   | /var/opt/firefox_addons                      | *Firefox addon installer                |
 | java          | /opt                                         | Java applications, like .jar            |
-| data          | /var/opt/data                                | Generic none executable files           |
-| vm            | /var/opt/vm_templates                        | *Virtual machine templates              |
+| libvirt       | /var/lib/libvirt/templates                   | *Libvirt templates, like .xml and qcow2 |
+| vm            | /var/opt/vm_templates                        | *Other virtual machine templates        |
 | web           | /var/opt/www_templates                       | Website templates, like .html and so on |                          
 | winapp        | **WIN_ROOT/opt                               | Windows executables, like .exe or .msi  |
 | windata       | **WIN_ROOT/data                              | Generic none executable files           |
 
-*These static files will only be linked from the downloads directory to the
-installation directory.  
+*These, usually large, static files will be linked from the downloads
+directory to the installation directory.  
 **WIN_ROOT is the root of the Windows installation, e.g. C:\
 
 ## OUTDATED LINKS
@@ -308,4 +321,4 @@ See license file
 
 ## SEE ALSO
 
-axel(1), dtrx(1), 
+axel(1), dtrx(1), jigdo-file(1), jigdo-lite(1)
