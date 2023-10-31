@@ -803,8 +803,8 @@ def cache_csv_to_list():
                 # ignore case on input package string
                 pkg_search = current_pkg.lstrip('=').lower()
                 pkg_nam = str(list_rows[i][0]).lower()
-                pkg_ver = str(list_rows[i][1])
-                pkg_ext = str(list_rows[i][2])
+                pkg_ver = str(list_rows[i][1]).lower()
+                pkg_ext = str(list_rows[i][2]).lower()
                 text_search = ": " + pkg_nam + "." + pkg_ext + " " + pkg_ver
                 # exact match
                 if pkg_search == pkg_nam:
