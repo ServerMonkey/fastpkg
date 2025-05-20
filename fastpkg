@@ -26,22 +26,25 @@ def print_err(text):
 
 # DETERMAINE OS ROOT ##########################################################
 
+# todo: move all this further down below the args part, replace with shell_cmd
 path_root = "/"
 # replace root path if Cygwin/Windows
 if "CYGWIN" in platform.system():
     cmd_get_win_root = "cygpath -u " + os.environ['HOMEDRIVE']
     # convert posix to windows path
-    osdetect_p = Popen(cmd_get_win_root, shell=True, stdout=PIPE, stderr=PIPE)
-    osdetect_stdout, osdetect_stderr = osdetect_p.communicate()
-    osdetect_stdout = str(osdetect_stdout)
-    osdetect_stderr = str(osdetect_stderr)
-    if osdetect_stderr:
-        if osdetect_stdout:
-            print_err("stdout: " + osdetect_stdout)
-        print_err("stderr: " + osdetect_stderr)
+    os_p = Popen(cmd_get_win_root, shell=True, stdout=PIPE, stderr=PIPE)
+    os_stdout, os_stderr = os_p.communicate()
+    os_stdout_clean = str(os_stdout).replace("b''", "").replace("b'", "")
+    os_stderr_clean = str(os_stderr).replace("b''", "").replace("b'", "")
+    os_stdout = os_stdout_clean.replace(r"\n'", "").replace(r"\n", " ")
+    os_stderr = os_stderr_clean.replace(r"\n'", "").replace(r"\n", " ")
+    if os_stderr:
+        if os_stdout:
+            print_err("stdout: " + os_stdout)
+        print_err("stderr: " + os_stderr)
         print_err("Detect OS failed, command: '" + cmd_get_win_root + "'")
         exit(1)
-    path_root = osdetect_stdout.rstrip('\n') + "/"
+    path_root = os_stdout.rstrip('\n') + "/"
 
 # BASIC STATIC VARIABLES ######################################################
 
@@ -478,6 +481,7 @@ def io_touch(des_file):
             "CYGWIN" in platform.system:
         if not os.path.isfile(des_file):
             os.mknod(des_file)
+            os.chmod(des_file, 0o644)
             printvvv("touch: OK " + des_file)
     else:
         error_crit("touch: forbidden to change files outside of "
@@ -591,15 +595,23 @@ def io_download_file(url, file_out):
 def shell_cmd(cmd):
     printvv("SHELL: " + cmd)
     p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
-    stdout, stderr = p.communicate()
-    stdout = str(stdout).rstrip("b''")
-    stderr = str(stderr).rstrip("b''")
+    stdout_raw, stderr_raw = p.communicate()
+    stdout_clean = str(stdout_raw).replace("b''", "").replace("b'", "")
+    stderr_clean = str(stderr_raw).replace("b''", "").replace("b'", "")
+    stdout = stdout_clean.replace(r"\n'", "").replace(r"\n", " ")
+    stderr = stderr_clean.replace(r"\n'", "").replace(r"\n", " ")
 
+    # fail only if there is a stderr and the return code is fail
+    # only warn if there is a stderr and the return code is OK
     if stderr != '':
         if stdout != '':
-            print_status("stdout", "err", stdout)
-        print_status("stderr", "err", stderr)
-        error_crit("shell_cmd failed '" + cmd + "'")
+            print_status("stdout", "warn", stdout)
+        print_status("stderr", "warn", stderr)
+        if p.returncode != 0:
+            if stdout != '':
+                print_status("stdout", "err", stdout)
+            print_status("stderr", "err", stderr)
+            error_crit("shell_cmd failed '" + cmd + "'")
     else:
         return stdout
 
@@ -835,13 +847,18 @@ def cache_csv_to_list():
             pgk_verified = False
             pkg_check = current_pkg_verify.lstrip('=').split('_')[
                 0].lower().replace('*', '')
+            info_name_check = pkg_check
+            if "_" in current_pkg_verify:
+                pkg_check_ver = current_pkg_verify.lstrip('=').split('_')[
+                    1].lower().replace('*', '')
+                info_name_check = pkg_check + "_" + pkg_check_ver
             printvvv("verify: " + pkg_check)
             for matching_pkg in list_rows_matching:
                 if matching_pkg.startswith(pkg_check):
                     pgk_verified = True
                     break
             if pgk_verified is False:
-                print_err("Package '" + pkg_check + "' not found")
+                print_err("Package '" + info_name_check + "' not found")
                 exit(1)
 
         if not list_rows_filtered:
@@ -1141,6 +1158,7 @@ def cmd_download(list_pkg):
                 if os.path.isfile(file_pkg_src) \
                         and os.path.getsize(file_pkg_src) == 0:
                     print_status(pkg_basename, "err", text_zerobytes)
+                    return False
                 # verify downloaded file
                 elif os.path.isfile(file_pkg_src):
                     # set permissions
@@ -1156,6 +1174,7 @@ def cmd_download(list_pkg):
                 else:
                     print_status(pkg_basename, "err",
                                  "download not found: " + file_pkg_src)
+                    return False
             # if error log
             else:
                 try:
@@ -1164,6 +1183,7 @@ def cmd_download(list_pkg):
                 except OSError as error:
                     error_crit("Error: " + str(error))
                 print_status(pkg_basename, "err", error_msg)
+                return False
 
     # download jigdo files
     if pkg_ext == '.jigdo':
@@ -1191,6 +1211,7 @@ def cmd_download(list_pkg):
             if offline_mode:
                 print("offline mode, not force removing download")
             else:
+                io_change_dir(path_base)
                 io_remove_dir(path_ji_tmp)
                 io_remove_file(file_pkg_ji_md5)
                 io_remove_file(file_pkg_ji_src)
@@ -1219,6 +1240,7 @@ def cmd_download(list_pkg):
                     print_status(pkg_ji_basename + " skip hash verification")
                 elif hash_file(file_pkg_ji_src, pkg_ji_md5):
                     io_set_file_executable(file_pkg_ji_src)
+                    io_change_dir(path_base)
                     io_remove_dir(path_ji_tmp)
                 else:
                     printvvv("jigdo hash verification failed")
@@ -1286,6 +1308,7 @@ def cmd_download(list_pkg):
                 # move download file one level up and cleanup
                 io_move_file(file_pkg_ji_src_tmp, file_pkg_ji_src)
                 io_set_file_executable(file_pkg_ji_src)
+                io_change_dir(path_base)
                 io_remove_dir(path_ji_tmp)
             else:
                 print_status(pkg_basename, "err",
@@ -1380,6 +1403,10 @@ def cmd_install():
             else:
                 print_status(pkg_basename + " already installed")
                 return
+
+        # abort if not downloaded
+        if not os.path.isfile(file_pkg_src):
+            error_crit("not installing, no such file: " + file_pkg_src)
 
         print_status(pkg_basename + " installing as " + pkg_ins, 'inst')
 
